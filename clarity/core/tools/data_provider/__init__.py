@@ -18,6 +18,7 @@ from .base import BaseFetcher, DataFetcherManager, DataFetchError, MarketType, d
 from .akshare_fetcher import AkshareFetcher
 from .efinance_fetcher import EfinanceFetcher
 from .yfinance_fetcher import YfinanceFetcher
+from .tengu_fetcher import TenguFetcher
 
 __all__ = [
     'BaseFetcher',
@@ -28,4 +29,5 @@ __all__ = [
     'AkshareFetcher',
     'EfinanceFetcher',
     'YfinanceFetcher',
+    'TenguFetcher',
 ]

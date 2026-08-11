@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import random
 import time
 from abc import ABC, abstractmethod
@@ -242,7 +243,14 @@ class DataFetcherManager:
             EfinanceFetcher(),
             YfinanceFetcher(),
         ]
-        
+
+        # Optional: Tengu FIRM (US equities + fundamentals/filings/insider/13F/
+        # congressional). Opt-in — only activates when a TENGU_API_KEY is present,
+        # so default behavior is unchanged. Free key: https://tengu.co/api
+        if os.getenv("TENGU_API_KEY") or os.getenv("FIRM_API_KEY"):
+            from .tengu_fetcher import TenguFetcher
+            self._fetchers.append(TenguFetcher())
+
         self._fetchers.sort(key=lambda f: f.priority)
         logger.info(f"已初始化 {len(self._fetchers)} 个数据源: " + 
                    ", ".join([f.name for f in self._fetchers]))
