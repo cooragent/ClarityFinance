@@ -4,6 +4,7 @@
 This module provides RESTful API endpoints for all agent functionalities.
 """
 
+import json
 import logging
 import os
 import sys
@@ -40,6 +41,10 @@ from clarity.core import (
     TaskType,
 )
 from clarity.core.tools.dashboard_scanner import DashboardScanner
+from clarity.core.tools.featured_portfolios import follow_featured_portfolio, get_featured_portfolios
+from clarity.core.tools.hotspot_tools import find_related_stocks, get_today_hotspots
+from clarity.core.tools.my_holdings import holdings_snapshot, remove_holding, set_position
+from clarity.core.tools.portfolio_evolution import create_portfolio, continue_portfolio
 from clarity.core.notification import NotificationService
 
 # Configure logging
@@ -106,6 +111,51 @@ class DashboardRequest(BaseModel):
     top_n: int = Field(10, description="Number of top stocks to recommend")
     push: bool = Field(False, description="Push report to notification channels")
     push_channels: Optional[List[str]] = Field(None, description="Specific channels to push to")
+
+
+class HotspotStocksRequest(BaseModel):
+    """Request model for finding stocks related to a hotspot."""
+    title: str = Field(..., min_length=1, description="Hotspot event title")
+    limit: int = Field(8, ge=1, le=20, description="Maximum number of stocks")
+
+
+class PortfolioCreateRequest(BaseModel):
+    profile: str = Field(..., min_length=1, max_length=40)
+    markets: List[str] = Field(default=["美股"])
+    sectors: List[str] = Field(default=["科技", "消费"])
+    risk: str = Field(default="均衡")
+    portfolio_size: int = Field(default=5, ge=2, le=20)
+    target_return_pct: float = Field(default=12, gt=0, le=200)
+    max_drawdown_pct: float = Field(default=20, gt=0, le=100)
+    trading_cost_pct: float = Field(default=0.15, ge=0, le=10)
+    start: str
+    end: str
+    rounds: int = Field(default=3, ge=0, le=20)
+    custom_tickers: str = ""
+
+
+class PortfolioContinueRequest(BaseModel):
+    rounds: int = Field(default=3, ge=1, le=20)
+    end: Optional[str] = None
+
+
+class FeaturedFollowRequest(BaseModel):
+    profile_prefix: str = Field(default="Follow", min_length=1, max_length=20)
+    risk: str = Field(default="均衡")
+    portfolio_size: int = Field(default=5, ge=2, le=20)
+    target_return_pct: float = Field(default=12, gt=0, le=200)
+    max_drawdown_pct: float = Field(default=20, gt=0, le=100)
+    trading_cost_pct: float = Field(default=0.15, ge=0, le=10)
+    years: int = Field(default=3, ge=1, le=20)
+    rounds: int = Field(default=3, ge=1, le=20)
+    end: Optional[str] = None
+
+
+class HoldingRequest(BaseModel):
+    ticker: str = Field(..., min_length=1, max_length=15)
+    name: str = Field(default="", max_length=100)
+    quantity: float = Field(default=0, ge=0)
+    avg_cost: float = Field(default=0, ge=0)
 
 
 class TaskResponse(BaseModel):
@@ -311,6 +361,94 @@ async def health():
         timestamp=datetime.now().isoformat(),
         version="1.0.0"
     )
+
+
+@app.get("/api/v1/hotspots")
+async def today_hotspots(limit: int = Query(10, ge=1, le=10)):
+    """Get today's top news events."""
+    try:
+        return await get_today_hotspots(limit)
+    except Exception as e:
+        logger.error("Error loading today's hotspots: %s", e, exc_info=True)
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.post("/api/v1/hotspots/stocks")
+async def hotspot_stocks(request: HotspotStocksRequest):
+    """Find stocks related to one hotspot event."""
+    try:
+        return await find_related_stocks(request.title, request.limit)
+    except Exception as e:
+        logger.error("Error searching hotspot stocks: %s", e, exc_info=True)
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+def _json_portfolio(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: json.loads(value.to_json(orient="records", date_format="iso")) if hasattr(value, "to_json") else value
+        for key, value in result.items()
+    }
+
+
+@app.post("/api/v1/portfolio/evolve")
+async def create_evolving_portfolio(request: PortfolioCreateRequest):
+    """Create a preference profile, baseline it, then test bounded Candidates."""
+    try:
+        return _json_portfolio(create_portfolio(**request.model_dump()))
+    except Exception as e:
+        logger.error("Error creating evolving portfolio: %s", e, exc_info=True)
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/v1/portfolio/evolve/{profile}")
+async def continue_evolving_portfolio(profile: str, request: PortfolioContinueRequest):
+    """Refresh market data and continue the saved portfolio evolution loop."""
+    try:
+        return _json_portfolio(continue_portfolio(profile, request.rounds, request.end))
+    except Exception as e:
+        logger.error("Error continuing portfolio evolution: %s", e, exc_info=True)
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/v1/portfolio/featured")
+async def featured_portfolios():
+    """List the ten public portfolios shown by default in the UI."""
+    return get_featured_portfolios()
+
+
+@app.post("/api/v1/portfolio/featured/{featured_id}/follow")
+async def follow_public_portfolio(featured_id: str, request: FeaturedFollowRequest):
+    """Seed or continue a self-evolving portfolio from public holdings."""
+    try:
+        return _json_portfolio(follow_featured_portfolio(featured_id, **request.model_dump()))
+    except Exception as e:
+        logger.error("Error following featured portfolio: %s", e, exc_info=True)
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/v1/holdings")
+async def my_holdings():
+    """Return saved positions with current quotes and P&L."""
+    return holdings_snapshot()
+
+
+@app.post("/api/v1/holdings")
+async def save_holding(request: HoldingRequest):
+    """Add a symbol or update its owned quantity and average cost."""
+    try:
+        set_position(request.ticker, request.quantity, request.avg_cost, request.name)
+        return holdings_snapshot()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/api/v1/holdings/{ticker}")
+async def delete_holding(ticker: str):
+    """Remove a symbol from My Holdings."""
+    try:
+        return {"holdings": remove_holding(ticker)}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.post("/api/v1/analyze", response_model=AnalysisResult)

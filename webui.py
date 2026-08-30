@@ -14,7 +14,7 @@ import asyncio
 import logging
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 # Add project to path
@@ -32,6 +32,7 @@ except (ImportError, PermissionError, OSError):
     pass
 
 import gradio as gr
+import pandas as pd
 
 from clarity.core import (
     AgentConfig,
@@ -39,6 +40,15 @@ from clarity.core import (
     TaskType,
 )
 from clarity.core.tools.dashboard_scanner import DashboardScanner
+from clarity.core.tools.backtest_tools import run_backtest
+from clarity.core.tools.featured_portfolios import (
+    FEATURED_PORTFOLIOS,
+    follow_featured_portfolio,
+    get_featured_portfolios,
+)
+from clarity.core.tools.hotspot_tools import find_related_stocks, get_today_hotspots
+from clarity.core.tools.my_holdings import add_holdings, holdings_snapshot, remove_holding, set_position
+from clarity.core.tools.portfolio_evolution import create_portfolio, continue_portfolio
 
 # Configure logging
 logging.basicConfig(
@@ -58,6 +68,268 @@ def get_orchestrator():
         config = AgentConfig()
         _orchestrator = FinancialAgentOrchestrator(config)
     return _orchestrator
+
+
+# ========== 今日热点 ==========
+
+def load_today_hotspots():
+    """Load and format today's top 10 events."""
+    try:
+        result = asyncio.run(get_today_hotspots())
+        hotspots = result["hotspots"]
+        lines = [
+            "# 🔥 今日 10 大热点事件",
+            "",
+            f"> 更新时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "",
+        ]
+        for item in hotspots:
+            title = str(item["title"]).replace("|", "\\|")
+            link = item.get("link", "")
+            lines.append(f"## {item['rank']}. [{title}]({link})")
+            lines.append(f"> {item.get('source') or '未知来源'} · {item.get('published') or '时间未知'}")
+            if item.get("summary"):
+                lines.append(str(item["summary"]))
+            lines.append("")
+
+        updates = [
+            gr.update(value=f"{i + 1}. {item['title'][:22]}", visible=i < len(hotspots))
+            if i < len(hotspots) else gr.update(visible=False)
+            for i, item in enumerate((hotspots + [{}] * 10)[:10])
+        ]
+        return "\n".join(lines), hotspots, *updates
+    except Exception as exc:
+        logger.error("Error loading today's hotspots: %s", exc, exc_info=True)
+        return f"❌ 热点获取失败：{exc}", [], *[gr.update(visible=False) for _ in range(10)]
+
+
+def search_hotspot_stocks(hotspots: list, index: int):
+    """Find stocks for one hotspot selected by its button."""
+    if index >= len(hotspots):
+        return "请先刷新今日热点。", {}, *[gr.update(visible=False) for _ in range(8)]
+    event = hotspots[index]
+    try:
+        result = asyncio.run(find_related_stocks(str(event["title"])))
+        lines = [f"# 📈 相关股票：{result['event']}", ""]
+        if result["stocks"]:
+            lines += [
+                "| 代码 | 名称 | 市场 | 关联线索 |",
+                "|:---:|:---|:---:|:---|",
+            ]
+            for stock in result["stocks"]:
+                relation = stock["relation"].replace("|", "\\|")
+                lines.append(
+                    f"| `{stock['symbol']}` | {stock['name']} | {stock['market']} | {relation} |"
+                )
+        else:
+            lines.append("暂未检索到明确关联的上市公司。")
+
+        if result["news"]:
+            lines += ["", "## 关联财经报道", ""]
+            for item in result["news"]:
+                lines.append(f"- [{item['title']}]({item['link']}) — {item['publisher']}")
+        lines += ["", "*搜索相关性不代表投资建议，请核实事件与公司的实际业务关联。*"]
+        updates = [
+            gr.update(value=f"＋ 加入持仓 {stock['symbol']}", visible=True)
+            if i < len(result["stocks"]) else gr.update(visible=False)
+            for i, stock in enumerate((result["stocks"] + [{}] * 8)[:8])
+        ]
+        return "\n".join(lines), result, *updates
+    except Exception as exc:
+        logger.error("Error searching stocks for hotspot: %s", exc, exc_info=True)
+        return f"❌ 相关股票搜索失败：{exc}", {}, *[gr.update(visible=False) for _ in range(8)]
+
+
+def add_hotspot_stock(result: dict, index: int):
+    stocks = result.get("stocks", []) if result else []
+    if index >= len(stocks):
+        return "请先搜索相关股票。"
+    stock = stocks[index]
+    add_holdings([stock], "今日热点", str(result.get("event", "")))
+    return f"✅ `{stock['symbol']}` 已加入“我的持仓”（数量未知，标记为待建仓）。"
+
+
+def quick_add_holding(ticker: str, source: str = "股票分析"):
+    try:
+        add_holdings([{"ticker": ticker}], source)
+        return f"✅ `{ticker.strip().upper()}` 已加入“我的持仓”（数量未知，标记为待建仓）。"
+    except Exception as exc:
+        return f"❌ 加入失败：{exc}"
+
+
+# ========== 策略回测 ==========
+
+def backtest_strategy(ticker, start, end, fast, slow, cash, commission, slippage):
+    """Run the built-in moving-average strategy and format its results."""
+    try:
+        result = run_backtest(
+            ticker.strip().upper(),
+            start,
+            end,
+            fast=int(fast),
+            slow=int(slow),
+            initial_cash=float(cash),
+            commission_pct=float(commission),
+            slippage_pct=float(slippage),
+        )
+        summary = f"""# 🧪 {result['ticker']} 策略回测
+
+> {result['start']} 至 {result['end']} · 数据源：{result['data_source']}
+
+| 指标 | 结果 | 指标 | 结果 |
+|:---|---:|:---|---:|
+| 策略收益 | **{result['total_return_pct']:+.2f}%** | 买入持有 | {result['benchmark_return_pct']:+.2f}% |
+| 期末资产 | {result['final_value']:,.2f} | 最大回撤 | {result['max_drawdown_pct']:.2f}% |
+| 夏普率 | {result['sharpe']:.2f} | 胜率 | {result['win_rate_pct']:.1f}% |
+| 已平仓交易 | {result['closed_trades']} | 初始资金 | {result['initial_cash']:,.2f} |
+
+*金叉后下一交易日开盘买入，死叉后下一交易日开盘清仓；结果仅供策略验证。*
+"""
+        return summary, result["curve"], result["orders"]
+    except Exception as exc:
+        logger.error("Backtest failed: %s", exc, exc_info=True)
+        return f"❌ 回测失败：{exc}", None, None
+
+
+# ========== 自演进组合 ==========
+
+def _format_portfolio_evolution(result):
+    metrics = result["metrics"]
+    benchmark = result["benchmark_metrics"]
+    params = result["params"]
+    summary = f"""# 🧬 {result['profile']} · V{result['version']}
+
+> 偏好评分：**{result['score']:.2f}/100** · 股票池：{len(result['universe'])} 只
+
+| 指标 | 策略组合 | 等权基准 |
+|:---|---:|---:|
+| 年化收益 | **{metrics['annual_return'] * 100:+.2f}%** | {benchmark['annual_return'] * 100:+.2f}% |
+| 总收益 | {metrics['total_return'] * 100:+.2f}% | {benchmark['total_return'] * 100:+.2f}% |
+| 最大回撤 | {metrics['max_drawdown'] * 100:.2f}% | {benchmark['max_drawdown'] * 100:.2f}% |
+| 夏普率 | {metrics['sharpe']:.2f} | {benchmark['sharpe']:.2f} |
+
+**当前策略：** 动量 {params['momentum_days']} 日 · 波动率 {params['volatility_days']} 日 · 每 {params['rebalance_days']} 日再平衡 · 现金缓冲 {params['cash_buffer'] * 100:.0f}%
+
+*仅当固定验证集上的偏好评分严格提高时，新候选才晋级；不构成投资建议。*
+"""
+    portfolio = pd.DataFrame(
+        [{"股票": item["ticker"], "目标权重": f"{item['weight'] * 100:.2f}%"} for item in result["portfolio"]]
+    )
+    history = result["history"]
+    if not history.empty:
+        history = history[["time", "version", "score", "annual_return_pct", "max_drawdown_pct", "decision"]].rename(
+            columns={"time": "时间", "version": "版本", "score": "评分", "annual_return_pct": "年化收益%", "max_drawdown_pct": "最大回撤%", "decision": "决策"}
+        )
+    return summary, portfolio, result["curve"], history
+
+
+def create_evolving_portfolio(profile, markets, sectors, risk, size, target, drawdown, cost, years, rounds, custom):
+    try:
+        end = datetime.now().strftime("%Y-%m-%d")
+        start = (datetime.now() - timedelta(days=int(years * 365))).strftime("%Y-%m-%d")
+        result = create_portfolio(
+            profile, markets, sectors, risk, int(size), float(target), float(drawdown),
+            float(cost), start, end, int(rounds), custom,
+        )
+        return _format_portfolio_evolution(result)
+    except Exception as exc:
+        logger.error("Portfolio creation failed: %s", exc, exc_info=True)
+        return f"❌ 组合创建失败：{exc}", None, None, None
+
+
+def continue_evolving_portfolio(profile, rounds):
+    try:
+        return _format_portfolio_evolution(continue_portfolio(profile, int(rounds)))
+    except Exception as exc:
+        logger.error("Portfolio evolution failed: %s", exc, exc_info=True)
+        return f"❌ 继续演进失败：{exc}", None, None, None
+
+
+def follow_featured(featured_id, profile, risk, size, target, drawdown, cost, years, rounds):
+    try:
+        result = follow_featured_portfolio(
+            featured_id, profile, risk, int(size), float(target), float(drawdown),
+            float(cost), int(years), int(rounds),
+        )
+        source = result["source_holdings"]
+        holdings = pd.DataFrame(
+            [{"股票": item["ticker"], "名称": item["name"], "披露权重": f"{item['weight_pct']:.2f}%", "最新动作": item["activity"]} for item in source["holdings"]]
+        )
+        summary, portfolio, curve, history = _format_portfolio_evolution(result)
+        summary = (
+            f"> 已 Follow **{source['manager']}** · {source['period']} · 持仓日期 {source['portfolio_date']} · [公开来源]({source['source_url']}) · 已自动同步“我的持仓”\n\n"
+            + summary
+        )
+        return holdings, summary, portfolio, curve, history
+    except Exception as exc:
+        logger.error("Following featured portfolio failed: %s", exc, exc_info=True)
+        return None, f"❌ Follow 失败：{exc}", None, None, None
+
+
+# ========== 我的持仓 ==========
+
+def _holding_outputs():
+    snapshot = holdings_snapshot()
+    totals = snapshot["totals"]
+
+    def total(key):
+        return " · ".join(f"{currency} {values[key]:,.2f}" for currency, values in totals.items()) or "—"
+
+    summary = f"""
+<div class="holding-cards">
+  <div class="holding-card"><span>持仓资产</span><strong>{snapshot['count']}</strong></div>
+  <div class="holding-card"><span>当前市值</span><strong>{total('market_value')}</strong></div>
+  <div class="holding-card"><span>今日盈亏</span><strong>{total('day_gain')}</strong></div>
+  <div class="holding-card"><span>累计盈亏</span><strong>{total('total_gain')}</strong></div>
+</div>
+<small>多市场资产按原交易币种分别汇总；“待建仓”项目需录入数量和平均成本后才计入盈亏。</small>
+"""
+    table = pd.DataFrame(
+        [
+            {
+                "股票": row["ticker"], "名称": row.get("name") or row["ticker"], "状态": row["status"],
+                "数量": row["quantity"], "平均成本": row["avg_cost"], "最新价": row["last_price"],
+                "币种": row["currency"], "市值": row["market_value"], "今日%": row["day_change_pct"],
+                "累计盈亏": row["total_gain"], "收益率%": row["total_gain_pct"],
+                "目标权重%": row.get("target_weight_pct"), "来源": " / ".join(row.get("sources", [])),
+            }
+            for row in snapshot["holdings"]
+        ]
+    )
+    allocation = pd.DataFrame(
+        [
+            {
+                "股票": row["ticker"],
+                "权重": row["allocation_pct"] or float(row.get("target_weight_pct") or 0),
+            }
+            for row in snapshot["holdings"]
+        ]
+    )
+    return summary, table, allocation
+
+
+def refresh_my_holdings():
+    try:
+        return _holding_outputs()
+    except Exception as exc:
+        logger.error("Loading holdings failed: %s", exc, exc_info=True)
+        return f"❌ 持仓加载失败：{exc}", None, None
+
+
+def save_my_position(ticker, name, quantity, avg_cost):
+    try:
+        set_position(ticker, float(quantity), float(avg_cost), name)
+        return "✅ 持仓已保存。", *_holding_outputs()
+    except Exception as exc:
+        return f"❌ 保存失败：{exc}", *refresh_my_holdings()
+
+
+def delete_my_position(ticker):
+    try:
+        remove_holding(ticker)
+        return "✅ 已从我的持仓移除。", *_holding_outputs()
+    except Exception as exc:
+        return f"❌ 移除失败：{exc}", *refresh_my_holdings()
 
 
 # ========== 股票分析 (流式输出) ==========
@@ -824,6 +1096,11 @@ def create_ui():
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
         color: white !important;
     }
+    .holding-cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 12px; }
+    .holding-card { padding: 16px; border: 1px solid #e2e8f0; border-radius: 14px; background: linear-gradient(145deg, #ffffff, #f8fafc); }
+    .holding-card span { display: block; color: #64748b; font-size: 0.85rem; margin-bottom: 8px; }
+    .holding-card strong { font-size: 1.25rem; color: #172554; }
+    @media (max-width: 720px) { .holding-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
     """
     
     # Store theme and css for launch()
@@ -856,6 +1133,60 @@ def create_ui():
         )
         
         with gr.Tabs():
+
+            # ===== 今日热点 Tab =====
+            with gr.TabItem("🔥 今日热点", id="hotspots"):
+                gr.Markdown("### 梳理今日 10 大热点，一键搜索关联股票")
+                hotspot_state = gr.State([])
+                related_stocks_state = gr.State({})
+
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        hotspot_refresh = gr.Button(
+                            "🔥 刷新今日热点", variant="primary", size="lg"
+                        )
+                        gr.Markdown("**点击任一热点即可搜索相关股票：**")
+                        hotspot_buttons = [
+                            gr.Button(f"热点 {i + 1}", visible=False)
+                            for i in range(10)
+                        ]
+
+                    with gr.Column(scale=3):
+                        hotspot_output = gr.Markdown(
+                            value="点击「刷新今日热点」获取今日榜单...",
+                            elem_classes=["markdown-text"],
+                            height=520,
+                        )
+                        hotspot_stocks_output = gr.Markdown(
+                            value="点击左侧热点搜索相关股票...",
+                            elem_classes=["markdown-text"],
+                            height=420,
+                        )
+                        hotspot_add_buttons = []
+                        for offset in (0, 4):
+                            with gr.Row():
+                                hotspot_add_buttons.extend(
+                                    gr.Button(f"加入持仓 {i + 1}", visible=False)
+                                    for i in range(offset, offset + 4)
+                                )
+                        hotspot_add_status = gr.Markdown()
+
+                hotspot_refresh.click(
+                    fn=load_today_hotspots,
+                    outputs=[hotspot_output, hotspot_state, *hotspot_buttons],
+                )
+                for i, button in enumerate(hotspot_buttons):
+                    button.click(
+                        fn=lambda hotspots, index=i: search_hotspot_stocks(hotspots, index),
+                        inputs=hotspot_state,
+                        outputs=[hotspot_stocks_output, related_stocks_state, *hotspot_add_buttons],
+                    )
+                for i, button in enumerate(hotspot_add_buttons):
+                    button.click(
+                        fn=lambda result, index=i: add_hotspot_stock(result, index),
+                        inputs=related_stocks_state,
+                        outputs=hotspot_add_status,
+                    )
             
             # ===== 决策仪表盘 Tab =====
             with gr.TabItem("📊 决策仪表盘", id="dashboard"):
@@ -915,6 +1246,8 @@ def create_ui():
                             variant="primary",
                             size="lg",
                         )
+                        analyze_add = gr.Button("＋ 加入我的持仓")
+                        analyze_add_status = gr.Markdown()
                         
                         gr.Markdown(
                             """
@@ -936,6 +1269,163 @@ def create_ui():
                     fn=analyze_stock_streaming,
                     inputs=[analyze_ticker, analyze_date],
                     outputs=analyze_output,
+                )
+                analyze_add.click(
+                    fn=quick_add_holding,
+                    inputs=analyze_ticker,
+                    outputs=analyze_add_status,
+                )
+
+            # ===== 自演进组合 Tab =====
+            with gr.TabItem("🧬 自演进组合", id="portfolio-evolution"):
+                gr.Markdown("### 根据投资偏好生成组合，并用持续回测决定策略版本是否晋级")
+                featured = get_featured_portfolios()
+                gr.Dataframe(
+                    value=[[item["rank"], item["name"], item["fund"], item["style"]] for item in featured],
+                    headers=["排名", "明星投资人 / 基金", "公开披露主体", "风格"],
+                    label="默认展示：全球 10 大明星投资人 / 基金公开美股组合",
+                    interactive=False,
+                )
+                featured_buttons = []
+                for offset in (0, 5):
+                    with gr.Row():
+                        for item in FEATURED_PORTFOLIOS[offset : offset + 5]:
+                            featured_buttons.append(gr.Button(f"＋ Follow {item['name']}"))
+                gr.Markdown("*Follow 会读取最新公开披露持仓，以其前 20 只股票作为种子，并按下方偏好持续回测；披露有时滞，不等于实时交易。*")
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        evolution_profile = gr.Textbox(label="组合名称", value="我的组合")
+                        evolution_risk = gr.Radio(["保守", "均衡", "进取"], value="均衡", label="风险偏好")
+                        evolution_markets = gr.CheckboxGroup(["A股", "港股", "美股"], value=["美股"], label="市场")
+                        evolution_sectors = gr.CheckboxGroup(["科技", "消费", "医疗", "金融", "能源"], value=["科技", "消费"], label="偏好行业")
+                        evolution_custom = gr.Textbox(label="自定义股票池（可选）", placeholder="AAPL, MSFT, NVDA")
+                        with gr.Row():
+                            evolution_size = gr.Number(label="持仓数量", value=5, precision=0)
+                            evolution_years = gr.Number(label="回测年数", value=3, precision=0)
+                        with gr.Row():
+                            evolution_target = gr.Number(label="目标年化 (%)", value=12)
+                            evolution_drawdown = gr.Number(label="最大容忍回撤 (%)", value=20)
+                        with gr.Row():
+                            evolution_cost = gr.Number(label="单边交易成本 (%)", value=0.15)
+                            evolution_rounds = gr.Number(label="本次演进轮数", value=3, precision=0)
+                        with gr.Row():
+                            evolution_create = gr.Button("✨ 创建组合", variant="primary")
+                            evolution_continue = gr.Button("🔁 继续演进")
+                        gr.Markdown("同名组合会持续保存版本；可通过 REST API 定时调用“继续演进”。")
+
+                    with gr.Column(scale=3):
+                        evolution_summary = gr.Markdown("填写偏好后创建组合...")
+                        featured_holdings = gr.Dataframe(label="已 Follow 的公开持仓", interactive=False)
+                        evolution_portfolio = gr.Dataframe(label="当前目标组合", interactive=False)
+                        evolution_curve = gr.LinePlot(
+                            x="date", y="value", color="series",
+                            title="验证集净值：策略组合 vs 等权基准", y_title="累计净值", height=360,
+                        )
+                        evolution_history = gr.Dataframe(label="已晋级版本", interactive=False)
+
+                evolution_outputs = [evolution_summary, evolution_portfolio, evolution_curve, evolution_history]
+                evolution_create.click(
+                    fn=create_evolving_portfolio,
+                    inputs=[evolution_profile, evolution_markets, evolution_sectors, evolution_risk, evolution_size, evolution_target, evolution_drawdown, evolution_cost, evolution_years, evolution_rounds, evolution_custom],
+                    outputs=evolution_outputs,
+                )
+                evolution_continue.click(
+                    fn=continue_evolving_portfolio,
+                    inputs=[evolution_profile, evolution_rounds],
+                    outputs=evolution_outputs,
+                )
+                for button, item in zip(featured_buttons, FEATURED_PORTFOLIOS):
+                    button.click(
+                        fn=lambda profile, risk, size, target, drawdown, cost, years, rounds, featured_id=item["id"]: follow_featured(
+                            featured_id, profile, risk, size, target, drawdown, cost, years, rounds
+                        ),
+                        inputs=[evolution_profile, evolution_risk, evolution_size, evolution_target, evolution_drawdown, evolution_cost, evolution_years, evolution_rounds],
+                        outputs=[featured_holdings, *evolution_outputs],
+                    )
+
+            # ===== 我的持仓 Tab =====
+            with gr.TabItem("💼 我的持仓", id="my-holdings") as my_holdings_tab:
+                gr.Markdown("### 我的持仓\n集中查看手动添加、热点发现和明星组合 Follow 的股票。")
+                my_holdings_summary = gr.Markdown(
+                    '<div class="holding-cards"><div class="holding-card"><span>持仓资产</span><strong>—</strong></div><div class="holding-card"><span>当前市值</span><strong>—</strong></div><div class="holding-card"><span>今日盈亏</span><strong>—</strong></div><div class="holding-card"><span>累计盈亏</span><strong>—</strong></div></div>'
+                )
+                with gr.Row():
+                    with gr.Column(scale=3):
+                        my_holdings_table = gr.Dataframe(label="持仓明细", interactive=False)
+                    with gr.Column(scale=2):
+                        my_holdings_allocation = gr.BarPlot(
+                            x="股票", y="权重", title="组合分布：实际权重 / 待建仓目标权重",
+                            y_title="权重 (%)", height=360,
+                        )
+                with gr.Row():
+                    my_ticker = gr.Textbox(label="股票代码", placeholder="NVDA")
+                    my_name = gr.Textbox(label="名称（可选）", placeholder="NVIDIA")
+                    my_quantity = gr.Number(label="数量", value=0, minimum=0)
+                    my_avg_cost = gr.Number(label="平均成本", value=0, minimum=0)
+                with gr.Row():
+                    my_save = gr.Button("保存 / 更新", variant="primary")
+                    my_delete = gr.Button("移除")
+                    my_refresh = gr.Button("刷新行情")
+                my_holdings_status = gr.Markdown()
+                my_holdings_outputs = [my_holdings_summary, my_holdings_table, my_holdings_allocation]
+                my_holdings_tab.select(fn=refresh_my_holdings, outputs=my_holdings_outputs)
+                my_refresh.click(fn=refresh_my_holdings, outputs=my_holdings_outputs)
+                my_save.click(
+                    fn=save_my_position,
+                    inputs=[my_ticker, my_name, my_quantity, my_avg_cost],
+                    outputs=[my_holdings_status, *my_holdings_outputs],
+                )
+                my_delete.click(
+                    fn=delete_my_position,
+                    inputs=my_ticker,
+                    outputs=[my_holdings_status, *my_holdings_outputs],
+                )
+
+            # ===== 策略回测 Tab =====
+            with gr.TabItem("🧪 策略回测", id="backtest"):
+                gr.Markdown("### 用历史行情验证均线交叉策略")
+                default_end = datetime.now().strftime("%Y-%m-%d")
+                default_start = (datetime.now() - timedelta(days=730)).strftime("%Y-%m-%d")
+
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        backtest_ticker = gr.Textbox(label="股票代码", value="AAPL")
+                        backtest_start = gr.Textbox(label="开始日期", value=default_start)
+                        backtest_end = gr.Textbox(label="结束日期", value=default_end)
+                        with gr.Row():
+                            backtest_fast = gr.Number(label="快均线", value=10, precision=0)
+                            backtest_slow = gr.Number(label="慢均线", value=30, precision=0)
+                        backtest_cash = gr.Number(label="初始资金", value=100000)
+                        with gr.Row():
+                            backtest_commission = gr.Number(label="佣金 (%)", value=0.1)
+                            backtest_slippage = gr.Number(label="滑点 (%)", value=0.05)
+                        backtest_btn = gr.Button("▶️ 开始回测", variant="primary", size="lg")
+
+                    with gr.Column(scale=3):
+                        backtest_summary = gr.Markdown("填写参数后点击「开始回测」...")
+                        backtest_curve = gr.LinePlot(
+                            x="date",
+                            y="value",
+                            color="series",
+                            title="策略净值与买入持有基准",
+                            y_title="资产净值",
+                            height=360,
+                        )
+                        backtest_orders = gr.Dataframe(label="交易明细", interactive=False)
+
+                backtest_btn.click(
+                    fn=backtest_strategy,
+                    inputs=[
+                        backtest_ticker,
+                        backtest_start,
+                        backtest_end,
+                        backtest_fast,
+                        backtest_slow,
+                        backtest_cash,
+                        backtest_commission,
+                        backtest_slippage,
+                    ],
+                    outputs=[backtest_summary, backtest_curve, backtest_orders],
                 )
             
             # ===== 持仓跟踪 Tab =====
