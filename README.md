@@ -201,19 +201,36 @@ print(result["report"])
 ### Web UI
 
 ```bash
-# activate env
-source .venv/bin/activate
+# Build the React app
+cd frontend
+npm install
+npm run build
+cd ..
 
-# Start Web interface
-uv run python webui.py
-
-# Create a public link (via Gradio Share)
-uv run python webui.py --share
+# Start Clarity API and the built web app
+uv run uvicorn api:app --host 127.0.0.1 --port 8000
 ```
 
-访问 http://localhost:7860 即可使用图形界面。
+Visit http://localhost:8000/app/. For frontend development, run `npm run dev`
+inside `frontend/`; Vite proxies API calls to port 8000.
 
-<video src="https://github.com/user-attachments/assets/678ece2c-2fd9-4214-8470-22e401647e4b" controls width="800"></video>
+The original Gradio UI remains available as a fallback with `uv run python webui.py`.
+
+#### Optional Vibe-Trading kernel
+
+Run Vibe-Trading in its own Python 3.11+ environment, then point Clarity at it:
+
+```bash
+# Vibe-Trading process
+vibe-trading serve --port 8899
+
+# Clarity process
+VIBE_TRADING_URL=http://127.0.0.1:8899 \
+  uv run uvicorn api:app --host 127.0.0.1 --port 8000
+```
+
+Clarity proxies session, message, and event-stream calls through `/api/v1/vibe/*`;
+the existing Clarity research, portfolio, holdings, hotspot, and backtest flows remain independent.
 
 ### CLI 命令
 
@@ -308,10 +325,12 @@ The system uses three persistent files to manage long tasks, solving LLM "forget
 ```
 Clarity/
 ├── api.py               # REST API server
-├── webui.py             # Gradio Web interface
+├── frontend/            # React/Vite Web interface
+├── webui.py             # Legacy Gradio fallback
 ├── run_agent.py         # CLI command tool
 └── clarity/
     ├── core/            # Core agents & tools
+    │   └── vibe_client.py # Vibe-Trading HTTP boundary
     └── dataflows/       # Data source integrations
 ```
 

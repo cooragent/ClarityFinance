@@ -3,11 +3,14 @@ env/
 __pycache__/
 .DS_Store
 *.csv
-src/
+/src/
 eval_results/
 eval_data/
 *.egg-info/
 .env
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
 
 # Runtime files (generated during execution)
 runtime/*

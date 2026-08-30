@@ -198,19 +198,35 @@ print(result["report"])
 ### Web UI
 
 ```bash
-# 启动环境
-source .venv/bin/activate
+# 构建 React 前端
+cd frontend
+npm install
+npm run build
+cd ..
 
-# 启动 Web 界面
-uv run python webui.py
-
-# 创建公开链接（通过 Gradio Share）
-uv run python webui.py --share
+# 启动 Clarity API 和构建后的前端
+uv run uvicorn api:app --host 127.0.0.1 --port 8000
 ```
 
-访问 http://localhost:7860 即可使用图形界面。
+访问 http://localhost:8000/app/。开发前端时可在 `frontend/` 内运行
+`npm run dev`，Vite 会把 API 请求代理到 8000 端口。
 
-<video src="assets/ui.mp4" controls width="800"></video>
+原 Gradio 页面仍作为备用入口保留：`uv run python webui.py`。
+
+#### 可选：Vibe-Trading 量化内核
+
+在独立的 Python 3.11+ 环境启动 Vibe-Trading，再让 Clarity 连接它：
+
+```bash
+# Vibe-Trading 进程
+vibe-trading serve --port 8899
+
+# Clarity 进程
+VIBE_TRADING_URL=http://127.0.0.1:8899 \
+  uv run uvicorn api:app --host 127.0.0.1 --port 8000
+```
+
+Clarity 通过 `/api/v1/vibe/*` 代理会话、消息和事件流；热点、分析、组合、持仓和回测等原有能力不依赖 Vibe，可独立运行。
 
 ### CLI 命令
 
@@ -303,10 +319,12 @@ notification.send("# 测试报告\n这是 Markdown 格式的消息")
 ```
 Clarity/
 ├── api.py               # REST API 服务器
-├── webui.py             # Gradio Web 界面
+├── frontend/            # React/Vite Web 界面
+├── webui.py             # 旧版 Gradio 备用界面
 ├── run_agent.py         # CLI 命令行工具
 └── clarity/
     ├── core/            # 核心智能体与工具
+    │   └── vibe_client.py # Vibe-Trading HTTP 边界
     └── dataflows/       # 数据源集成
 ```
 

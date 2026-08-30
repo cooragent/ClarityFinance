@@ -14,6 +14,8 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 # Add project to path
@@ -41,10 +43,12 @@ from clarity.core import (
     TaskType,
 )
 from clarity.core.tools.dashboard_scanner import DashboardScanner
+from clarity.core.tools.backtest_tools import run_backtest
 from clarity.core.tools.featured_portfolios import follow_featured_portfolio, get_featured_portfolios
 from clarity.core.tools.hotspot_tools import find_related_stocks, get_today_hotspots
 from clarity.core.tools.my_holdings import holdings_snapshot, remove_holding, set_position
 from clarity.core.tools.portfolio_evolution import create_portfolio, continue_portfolio
+from clarity.core.vibe_client import VibeTradingClient
 from clarity.core.notification import NotificationService
 
 # Configure logging
@@ -156,6 +160,25 @@ class HoldingRequest(BaseModel):
     name: str = Field(default="", max_length=100)
     quantity: float = Field(default=0, ge=0)
     avg_cost: float = Field(default=0, ge=0)
+
+
+class BacktestRequest(BaseModel):
+    ticker: str = Field(..., min_length=1, max_length=15)
+    start: str
+    end: str
+    fast: int = Field(default=20, ge=2, le=500)
+    slow: int = Field(default=60, ge=3, le=1000)
+    initial_cash: float = Field(default=100000, gt=0)
+    commission_pct: float = Field(default=0.1, ge=0, le=10)
+    slippage_pct: float = Field(default=0.05, ge=0, le=10)
+
+
+class VibeSessionRequest(BaseModel):
+    title: str = Field(default="Clarity 量化研究", min_length=1, max_length=100)
+
+
+class VibeMessageRequest(BaseModel):
+    content: str = Field(..., min_length=1, max_length=20000)
 
 
 class TaskResponse(BaseModel):
@@ -451,6 +474,61 @@ async def delete_holding(ticker: str):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@app.post("/api/v1/backtest")
+async def backtest(request: BacktestRequest):
+    """Run the built-in moving-average strategy."""
+    try:
+        return _json_portfolio(run_backtest(**request.model_dump()))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/v1/vibe/status")
+async def vibe_status():
+    """Report whether the separately running Vibe-Trading kernel is reachable."""
+    client = VibeTradingClient()
+    try:
+        return await client.status()
+    except Exception as e:
+        return {"connected": False, "url": client.base_url, "error": str(e)}
+
+
+@app.post("/api/v1/vibe/sessions")
+async def create_vibe_session(request: VibeSessionRequest):
+    try:
+        return await VibeTradingClient().create_session(request.title)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Vibe-Trading 不可用：{e}")
+
+
+@app.post("/api/v1/vibe/sessions/{session_id}/messages")
+async def send_vibe_message(session_id: str, request: VibeMessageRequest):
+    try:
+        return await VibeTradingClient().send_message(session_id, request.content)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Vibe-Trading 请求失败：{e}")
+
+
+@app.get("/api/v1/vibe/sessions/{session_id}/messages")
+async def get_vibe_messages(session_id: str):
+    try:
+        return await VibeTradingClient().messages(session_id)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Vibe-Trading 请求失败：{e}")
+
+
+@app.get("/api/v1/vibe/sessions/{session_id}/events")
+async def vibe_session_events(session_id: str):
+    async def proxy():
+        try:
+            async for chunk in VibeTradingClient().events(session_id):
+                yield chunk
+        except Exception as exc:
+            yield f"event: error\ndata: {json.dumps({'error': str(exc)}, ensure_ascii=False)}\n\n".encode()
+
+    return StreamingResponse(proxy(), media_type="text/event-stream")
+
+
 @app.post("/api/v1/analyze", response_model=AnalysisResult)
 async def analyze_stock(request: AnalyzeRequest):
     """
@@ -690,6 +768,11 @@ async def get_notification_channels():
     except Exception as e:
         logger.error(f"Error getting notification channels: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+frontend_dist = Path(__file__).parent / "frontend" / "dist"
+if frontend_dist.exists():
+    app.mount("/app", StaticFiles(directory=frontend_dist, html=True), name="react-app")
 
 
 # ==================== Main ====================
