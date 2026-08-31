@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import sys
+from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -46,8 +47,16 @@ from clarity.core.tools.dashboard_scanner import DashboardScanner
 from clarity.core.tools.backtest_tools import run_backtest
 from clarity.core.tools.featured_portfolios import follow_featured_portfolio, get_featured_portfolios
 from clarity.core.tools.hotspot_tools import find_related_stocks, get_today_hotspots
-from clarity.core.tools.my_holdings import holdings_snapshot, remove_holding, set_position
-from clarity.core.tools.portfolio_evolution import create_portfolio, continue_portfolio
+from clarity.core.tools.my_holdings import (
+    add_watchlist,
+    buy_virtual_capital,
+    holdings_performance,
+    holdings_snapshot,
+    invest_capital,
+    remove_holding,
+    set_position,
+)
+from clarity.core.tools.portfolio_evolution import _atomic_json, _read_json, _state_exists, create_portfolio, continue_portfolio
 from clarity.core.vibe_client import VibeTradingClient
 from clarity.core.notification import NotificationService
 
@@ -57,6 +66,11 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+RUNTIME_DIR = Path(__file__).resolve().parent / "runtime"
+HOTSPOTS_CACHE_FILE = RUNTIME_DIR / "latest_hotspots.json"
+DASHBOARD_CACHE_FILE = RUNTIME_DIR / "latest_dashboard.json"
+HOTSPOTS_CACHE_LIMIT = 100
+HOTSPOTS_CACHE_VERSION = 2
 
 # FastAPI app
 app = FastAPI(
@@ -153,13 +167,23 @@ class FeaturedFollowRequest(BaseModel):
     years: int = Field(default=3, ge=1, le=20)
     rounds: int = Field(default=3, ge=1, le=20)
     end: Optional[str] = None
+    capital_usd: float = Field(default=100_000, gt=0)
 
 
 class HoldingRequest(BaseModel):
     ticker: str = Field(..., min_length=1, max_length=15)
     name: str = Field(default="", max_length=100)
-    quantity: float = Field(default=0, ge=0)
-    avg_cost: float = Field(default=0, ge=0)
+    quantity: Optional[float] = Field(default=None, ge=0)
+    avg_cost: Optional[float] = Field(default=None, ge=0)
+
+
+class CapitalInvestmentRequest(BaseModel):
+    capital_usd: float = Field(..., gt=0)
+    name: str = Field(default="", max_length=100)
+
+
+class VirtualCapitalRequest(BaseModel):
+    packs: int = Field(default=1, ge=1, le=100)
 
 
 class BacktestRequest(BaseModel):
@@ -364,6 +388,11 @@ def _generate_dashboard_markdown(result: dict) -> str:
     return "\n".join(lines)
 
 
+def _dashboard_rows(values: list[Any]) -> list[dict[str, Any]]:
+    """Normalize scanner dataclasses at the HTTP boundary."""
+    return [asdict(value) if is_dataclass(value) else value for value in values]
+
+
 # ==================== API Endpoints ====================
 
 @app.get("/", response_model=HealthResponse)
@@ -387,10 +416,17 @@ async def health():
 
 
 @app.get("/api/v1/hotspots")
-async def today_hotspots(limit: int = Query(10, ge=1, le=10)):
+async def today_hotspots(limit: int = Query(10, ge=1, le=100), refresh: bool = Query(False)):
     """Get today's top news events."""
     try:
-        return await get_today_hotspots(limit)
+        result = _read_json(HOTSPOTS_CACHE_FILE, {}) if _state_exists(HOTSPOTS_CACHE_FILE) else {}
+        if refresh or result.get("date") != datetime.now().strftime("%Y-%m-%d") or result.get("cache_limit") != HOTSPOTS_CACHE_LIMIT or result.get("cache_version") != HOTSPOTS_CACHE_VERSION:
+            result = await get_today_hotspots(HOTSPOTS_CACHE_LIMIT)
+            result["cache_limit"] = HOTSPOTS_CACHE_LIMIT
+            result["cache_version"] = HOTSPOTS_CACHE_VERSION
+            _atomic_json(HOTSPOTS_CACHE_FILE, result)
+        hotspots = result.get("hotspots", [])
+        return {**result, "hotspots": hotspots[:limit], "has_more": len(hotspots) > limit}
     except Exception as e:
         logger.error("Error loading today's hotspots: %s", e, exc_info=True)
         raise HTTPException(status_code=502, detail=str(e))
@@ -455,12 +491,41 @@ async def my_holdings():
     return holdings_snapshot()
 
 
+@app.get("/api/v1/holdings/performance")
+async def my_holdings_performance(days: int = Query(90, ge=7, le=365)):
+    """Return daily portfolio return series for the current positions."""
+    return holdings_performance(days)
+
+
 @app.post("/api/v1/holdings")
 async def save_holding(request: HoldingRequest):
-    """Add a symbol or update its owned quantity and average cost."""
+    """Add a symbol to the watchlist or update a manually entered position."""
     try:
-        set_position(request.ticker, request.quantity, request.avg_cost, request.name)
+        if request.quantity is None and request.avg_cost is None:
+            add_watchlist(request.ticker, request.name)
+        elif request.quantity is None or request.avg_cost is None:
+            raise ValueError("数量和平均成本必须同时填写")
+        else:
+            set_position(request.ticker, request.quantity, request.avg_cost, request.name)
         return holdings_snapshot()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/v1/holdings/{ticker}/invest")
+async def invest_in_holding(ticker: str, request: CapitalInvestmentRequest):
+    """Increase one simulated position using available USD capital."""
+    try:
+        return invest_capital(ticker, request.capital_usd, request.name)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/v1/account/virtual-capital")
+async def purchase_virtual_capital(request: VirtualCapitalRequest):
+    """Buy $1m of simulated capital for each virtual $10 pack."""
+    try:
+        return buy_virtual_capital(request.packs)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -697,15 +762,16 @@ async def run_dashboard(request: DashboardRequest, background_tasks: BackgroundT
 
         scanner = DashboardScanner()
         result = scanner.scan_market(markets=request.markets, top_n=request.top_n)
+        result["market_overviews"] = _dashboard_rows(result.get("market_overviews", []))
+        result["recommendations"] = _dashboard_rows(result.get("recommendations", []))
 
         # Generate markdown report
         markdown = _generate_dashboard_markdown(result)
         result["markdown"] = markdown
 
         # Save to file
-        runtime_dir = Path(__file__).parent / "runtime"
-        runtime_dir.mkdir(parents=True, exist_ok=True)
-        default_file = runtime_dir / f"dashboard_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+        RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+        default_file = RUNTIME_DIR / f"dashboard_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
         default_file.write_text(markdown, encoding="utf-8")
 
         logger.info(f"Dashboard report saved to: {default_file}")
@@ -742,7 +808,7 @@ async def run_dashboard(request: DashboardRequest, background_tasks: BackgroundT
             background_tasks.add_task(send_notification)
             notification_sent = True
 
-        return DashboardResult(
+        response = DashboardResult(
             success=True,
             date=result.get("date", datetime.now().strftime("%Y-%m-%d")),
             market_overviews=result.get("market_overviews", []),
@@ -751,9 +817,20 @@ async def run_dashboard(request: DashboardRequest, background_tasks: BackgroundT
             markdown=markdown,
             notification_sent=notification_sent,
         )
+        _atomic_json(DASHBOARD_CACHE_FILE, response.model_dump(mode="json"))
+        return response
     except Exception as e:
         logger.error(f"Error running dashboard: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/dashboard/latest")
+async def latest_dashboard():
+    """Return the most recently completed dashboard scan."""
+    if _state_exists(DASHBOARD_CACHE_FILE):
+        return _read_json(DASHBOARD_CACHE_FILE, {})
+    reports = sorted(RUNTIME_DIR.glob("dashboard_*.md"), reverse=True)
+    return {"markdown": reports[0].read_text(encoding="utf-8")} if reports else {}
 
 
 @app.get("/api/v1/notification/channels")

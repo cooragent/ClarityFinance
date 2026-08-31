@@ -20,19 +20,22 @@ def test_hotspot_and_stock_parsing():
         {
             "QuotationCodeTable": {
                 "Data": [
-                    {"Code": "NVDA", "Name": "英伟达", "Classify": "UsStock", "SecurityTypeName": "美股"}
+                    {"Code": "688825", "Name": "长鑫科技", "Classify": "23", "SecurityTypeName": "科创板", "MktNum": "1", "QuoteID": "1.688825"}
                 ]
             }
         },
-        "英伟达",
+        "长鑫科技",
     )
     assert stock == {
-        "symbol": "NVDA",
-        "name": "英伟达",
-        "market": "美股",
-        "relation": "事件中提及“英伟达”",
+        "symbol": "688825",
+        "name": "长鑫科技",
+        "market": "科创板",
+        "relation": "事件中提及“长鑫科技”",
+        "chart_url": "https://quote.eastmoney.com/unify/r/1.688825",
+        "source": "东方财富行情",
     }
     assert "英伟达" in _event_keywords("【早报】美股走高；英伟达财报出炉、SpaceX启动IPO")
+    assert _event_keywords("长鑫科技下周一上市，发行价为8.66元/股")[0] == "长鑫科技"
     assert [
         stock["symbol"]
         for stock in _extract_stock_codes("NASDAQ: NVDA、600519 和 0700.HK")

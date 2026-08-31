@@ -14,8 +14,9 @@ import httpx
 
 
 GOOGLE_NEWS_RSS = (
+    # ponytail: RSS headlines are leads, not verified status; add exchange-disclosure checks if normalization is required.
     "https://news.google.com/rss/search?"
-    f"q={quote_plus('财经 OR 金融 OR 股市 OR 科技 OR 商业 when:1d')}"
+    f"q={quote_plus('(财经 OR 金融 OR 股市 OR 科技 OR 商业) when:1d')}"
     "&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
 )
 EASTMONEY_SEARCH = "https://searchapi.eastmoney.com/api/suggest/get"
@@ -83,6 +84,7 @@ def _event_keywords(title: str) -> list[str]:
     title = re.sub(r"【[^】]+】", "", title)
     parts = re.split(
         r"[，,；;：:、/|]|助力|宣布|发布|启动|财报|出炉|上涨|下跌|走高|走低|"
+        r"下周[一二三四五六日天]?|本周[一二三四五六日天]?|今天|今日|昨日|上市|发行价|"
         r"收购|投资|获批|签署|计划|完成|终止|回应|拟|将|与",
         title,
     )
@@ -98,34 +100,52 @@ def _event_keywords(title: str) -> list[str]:
 def _parse_eastmoney(payload: dict[str, Any], keyword: str) -> dict[str, str] | None:
     items = payload.get("QuotationCodeTable", {}).get("Data") or []
     for item in items:
-        if item.get("Classify") not in {"AStock", "HK", "UsStock"}:
+        quote_id = str(item.get("QuoteID", ""))
+        market_number = str(item.get("MktNum") or quote_id.partition(".")[0])
+        if market_number not in {"0", "1", "105", "106", "107", "116"}:
             continue
         name = item.get("Name", "")
         if keyword.casefold() not in name.casefold() and name.casefold() not in keyword.casefold():
             continue
+        symbol = str(item.get("Code", ""))
+        if not symbol:
+            continue
         return {
-            "symbol": item.get("Code", ""),
+            "symbol": symbol,
             "name": name,
-            "market": item.get("SecurityTypeName", "-"),
+            "market": item.get("SecurityTypeName") or {"0": "A股", "1": "A股", "116": "港股"}.get(market_number, "美股"),
             "relation": f"事件中提及“{keyword}”",
+            "chart_url": f"https://quote.eastmoney.com/unify/r/{quote_id or f'{market_number}.{symbol}'}",
+            "source": "东方财富行情",
         }
     return None
 
 
 def _extract_stock_codes(text: str) -> list[dict[str, str]]:
     patterns = [
-        (r"(?:NASDAQ|NYSE|AMEX)\s*[:：]\s*([A-Z][A-Z0-9.-]{0,5})", "美股"),
-        (r"(?<!\d)([036]\d{5})(?:\.(?:SS|SZ))?(?!\d)", "A股"),
-        (r"(?<!\d)(\d{4,5})\.HK\b", "港股"),
+        (r"NASDAQ\s*[:：]\s*([A-Z][A-Z0-9.-]{0,5})", "美股", "105"),
+        (r"NYSE\s*[:：]\s*([A-Z][A-Z0-9.-]{0,5})", "美股", "106"),
+        (r"AMEX\s*[:：]\s*([A-Z][A-Z0-9.-]{0,5})", "美股", "107"),
+        (r"(?<!\d)([036]\d{5})(?:\.(?:SS|SZ))?(?!\d)", "A股", ""),
+        (r"(?<!\d)(\d{4,5})\.HK\b", "港股", "116"),
     ]
     found = []
     seen = set()
-    for pattern, market in patterns:
+    for pattern, market, market_number in patterns:
         for symbol in re.findall(pattern, text, flags=re.IGNORECASE):
             symbol = symbol.upper()
             if symbol not in seen:
                 seen.add(symbol)
-                found.append({"symbol": symbol, "name": "-", "market": market, "relation": "关联报道明确提及"})
+                quote_market = market_number or ("1" if symbol.startswith("6") else "0")
+                quote_symbol = symbol.zfill(5) if market == "港股" else symbol
+                found.append({
+                    "symbol": symbol,
+                    "name": "-",
+                    "market": market,
+                    "relation": "关联报道明确提及",
+                    "chart_url": f"https://quote.eastmoney.com/unify/r/{quote_market}.{quote_symbol}",
+                    "source": "关联报道",
+                })
     return found
 
 
