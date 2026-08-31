@@ -10,6 +10,8 @@ eval_data/
 .env
 frontend/node_modules/
 frontend/dist/
+frontend/dist-extension/
+frontend/*.zip
 frontend/*.tsbuildinfo
 
 # Runtime files (generated during execution)

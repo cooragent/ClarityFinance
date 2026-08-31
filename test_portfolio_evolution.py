@@ -1,7 +1,6 @@
-import json
-
 import pandas as pd
 
+from clarity.core.state_store import state_history
 from clarity.core.tools import portfolio_evolution
 from clarity.core.tools.portfolio_evolution import _candidate, evaluate_portfolio
 
@@ -47,9 +46,10 @@ def test_evolution_persists_attempts_and_snapshot(tmp_path, monkeypatch):
         "test", ["美股"], ["科技"], "均衡", 2, 10, 20, 0.1,
         "2022-01-01", "2023-12-31", rounds=2, custom_tickers="A,B,C",
     )
-    state = json.loads((tmp_path / "test" / "state.json").read_text())
-    attempts = json.loads((tmp_path / "test" / "attempts.json").read_text())
+    state_path = tmp_path / "test" / "state.json"
+    state = portfolio_evolution._read_json(state_path, None)
+    attempts = portfolio_evolution._read_json(tmp_path / "test" / "attempts.json", [])
     assert result["version"] == state["version"]
     assert state["next_version"] == 4
     assert len(attempts) == 2
-    assert list((tmp_path / "test" / "snapshots").glob("*.json"))
+    assert len(state_history(state_path)) >= 4

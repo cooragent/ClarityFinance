@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build"
+    "build": "tsc -b && vite build",
+    "build:extension": "tsc -b && vite build --mode extension",
+    "package:extension": "npm run build:extension && cd dist-extension && zip -qrFS ../clarityfinance-chrome-0.1.0.zip ."
   },
   "dependencies": {
     "lucide-react": "^0.468.0",

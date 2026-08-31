@@ -8,8 +8,8 @@ from datetime import datetime, timedelta
 import httpx
 from parsel import Selector
 
-from .my_holdings import add_holdings
-from .portfolio_evolution import _profile_dir, continue_portfolio, create_portfolio
+from .my_holdings import invest_weighted_holdings
+from .portfolio_evolution import _profile_dir, _state_exists, continue_portfolio, create_portfolio
 
 
 SOURCE_URL = "https://www.dataroma.com/m/holdings.php?m={}"
@@ -92,6 +92,7 @@ def follow_featured_portfolio(
     years: int = 3,
     rounds: int = 3,
     end: str | None = None,
+    capital_usd: float = 100_000,
 ) -> dict:
     featured = next((item for item in FEATURED_PORTFOLIOS if item["id"] == featured_id), None)
     if not featured:
@@ -101,7 +102,7 @@ def follow_featured_portfolio(
     start = (datetime.fromisoformat(end) - timedelta(days=int(years) * 365)).strftime("%Y-%m-%d")
     period = re.sub(r"[^A-Za-z0-9]+", "-", disclosure["period"]).strip("-")
     profile = f"{profile_prefix.strip() or 'Follow'}-{featured['name']}-{period}"
-    if (_profile_dir(profile) / "state.json").exists():
+    if _state_exists(_profile_dir(profile) / "state.json"):
         result = continue_portfolio(profile, rounds, end)
     else:
         tickers = ",".join(item["ticker"] for item in disclosure["holdings"])
@@ -113,9 +114,13 @@ def follow_featured_portfolio(
         )
     result["featured"] = featured
     result["source_holdings"] = disclosure
-    add_holdings(
+    investment = invest_weighted_holdings(
         disclosure["holdings"],
+        capital_usd,
         "Follow 明星组合",
         f"{disclosure['manager']} · {disclosure['period']}",
+        f"featured:{featured_id}:{disclosure['period']}",
     )
+    result["investment"] = investment["investment"]
+    result["account"] = investment["account"]
     return result

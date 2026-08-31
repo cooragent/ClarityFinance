@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from datetime import datetime
 from math import sqrt
@@ -13,6 +12,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from ..state_store import DATABASE_FILE, read_state, state_exists, write_state
 from .data_provider import YfinanceFetcher
 
 
@@ -48,14 +48,15 @@ BASE_PARAMS = {
 
 
 def _atomic_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp.replace(path)
+    write_state(path, value)
 
 
 def _read_json(path: Path, default: Any) -> Any:
-    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else default
+    return read_state(path, default)
+
+
+def _state_exists(path: Path) -> bool:
+    return state_exists(path)
 
 
 def _append(path: Path, entry: dict[str, Any]) -> None:
@@ -246,7 +247,7 @@ def _public_result(state: dict[str, Any], evaluation: dict[str, Any], profile_di
         "curve": evaluation["curve"],
         "history": pd.DataFrame(scoreboard),
         "data_errors": errors,
-        "state_path": str(profile_dir / "state.json"),
+        "state_path": f"{DATABASE_FILE}#portfolio_evolution/{profile_dir.name}/state",
     }
 
 
@@ -265,7 +266,7 @@ def create_portfolio(
     custom_tickers: str = "",
 ) -> dict[str, Any]:
     profile_dir = _profile_dir(profile)
-    if (profile_dir / "state.json").exists():
+    if _state_exists(profile_dir / "state.json"):
         raise ValueError("该组合名称已存在，请使用“继续演进”或换一个名称")
     if risk not in BASE_PARAMS or not 2 <= portfolio_size <= 20 or rounds < 0 or rounds > 20:
         raise ValueError("风险偏好、持仓数量或演进轮数无效")
@@ -331,7 +332,7 @@ def continue_portfolio(profile: str, rounds: int = 3, end: str | None = None) ->
 
     for _ in range(rounds):
         snapshot = profile_dir / "snapshots" / f"v{state['version']}-{benchmark_id}.json"
-        if not snapshot.exists():
+        if not _state_exists(snapshot):
             _atomic_json(snapshot, state)
         state["attempt"] += 1
         candidate_version = state["next_version"]
