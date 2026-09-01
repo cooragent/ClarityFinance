@@ -1,16 +1,16 @@
 import { FormEvent, ReactNode, useEffect, useRef, useState } from "react";
 import {
   Activity, BarChart3, Bot, BrainCircuit, ChevronRight, CircleDollarSign,
-  ExternalLink, Flame, LayoutDashboard, LineChart as LineIcon, ListFilter, Menu, Plus,
-  Maximize2, Radar, RefreshCw, Search, Send, Star, Trash2, UserRoundSearch, WalletCards, X,
+  ExternalLink, Flame, LayoutDashboard, LineChart as LineIcon, ListFilter, LogOut, Menu, Plus,
+  Maximize2, Radar, RefreshCw, Search, Send, Star, Trash2, UserRound, UserRoundSearch, WalletCards, X,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { CartesianGrid, Cell, Legend, Line, LineChart, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { del, get, post } from "./api";
+import { clearAuthToken, del, get, getAuthToken, post, setAuthToken } from "./api";
 
 type Json = Record<string, any>;
-type Page = "vibe" | "hotspots" | "dashboard" | "analyze" | "evolve" | "holdings" | "backtest" | "track" | "screen" | "ask";
+type Page = "vibe" | "hotspots" | "dashboard" | "analyze" | "evolve" | "simulation" | "backtest" | "track" | "screen" | "ask";
 
 const today = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
 const yearsAgo = (years: number) => new Date(Date.now() - years * 365 * 864e5).toISOString().slice(0, 10);
@@ -18,7 +18,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const fmt = (value: unknown, digits = 2) => Number(value || 0).toLocaleString("zh-CN", { maximumFractionDigits: digits });
 
 const nav: { id: Page; label: string; icon: typeof Bot; group: string }[] = [
-  { id: "holdings", label: "我的持仓", icon: WalletCards, group: "工作台" },
+  { id: "simulation", label: "模拟交易", icon: WalletCards, group: "工作台" },
   { id: "hotspots", label: "今日热点", icon: Flame, group: "工作台" },
   { id: "dashboard", label: "决策仪表盘", icon: LayoutDashboard, group: "工作台" },
   { id: "track", label: "持仓追踪", icon: UserRoundSearch, group: "工作台" },
@@ -36,7 +36,7 @@ const pageMeta: Record<Page, [string, string]> = {
   dashboard: ["决策仪表盘", "扫描市场，生成今日关注清单"],
   analyze: ["个股分析", "多智能体基本面与交易研究"],
   evolve: ["自演进策略", "根据偏好持续回测并迭代参数"],
-  holdings: ["我的持仓", "统一管理关注标的与真实仓位"],
+  simulation: ["模拟交易", "独立管理虚拟资金、模拟持仓与收益"],
   backtest: ["策略探索", "验证策略的收益、风险与交易记录"],
   track: ["持仓追踪", "Follow 全球明星科技大佬与基金，并研究公开持仓"],
   screen: ["股票筛选", "用自然语言描述你的选股条件"],
@@ -60,6 +60,22 @@ function Card({ title, action, children, className = "" }: { title?: string; act
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return <label className="field"><span>{label}</span>{children}</label>;
+}
+
+function AuthPage({ onAuth }: { onAuth: (user: Json) => void }) {
+  const [mode, setMode] = useState<"login" | "register">("login");
+  const [form, setForm] = useState({ email: "", password: "", display_name: "" });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function submit(event: FormEvent) {
+    event.preventDefault(); setBusy(true); setError("");
+    try {
+      const result = await post<Json>(`/api/v1/auth/${mode}`, form);
+      setAuthToken(result.token); onAuth(result.user);
+    } catch (e) { setError((e as Error).message); }
+    finally { setBusy(false); }
+  }
+  return <main className="auth-shell"><Card className="auth-card"><div className="brand auth-brand"><div className="brand-mark"><CircleDollarSign size={22} /></div><div><strong>Clarity</strong><span>Finance OS</span></div></div><h1>{mode === "login" ? "登录账户" : "创建账户"}</h1><p className="muted">每个账户拥有独立的模拟资金与持仓数据。</p><form onSubmit={submit} className="auth-form">{mode === "register" && <Field label="用户名"><input required value={form.display_name} onChange={(e) => setForm({ ...form, display_name: e.target.value })} /></Field>}<Field label="邮箱"><input required type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></Field><Field label="密码"><input required type="password" minLength={8} value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} /></Field><Button busy={busy} type="submit">{mode === "login" ? "登录" : "注册并登录"}</Button></form><ErrorBox error={error} /><button className="auth-switch" onClick={() => { setMode(mode === "login" ? "register" : "login"); setError(""); }}>{mode === "login" ? "没有账户？立即注册" : "已有账户？返回登录"}</button></Card></main>;
 }
 
 function Markdown({ value }: { value?: string }) {
@@ -101,11 +117,11 @@ function AddHolding({ ticker, name = "" }: { ticker: string; name?: string }) {
   const [failed, setFailed] = useState(false);
   async function add() {
     setBusy(true); setFailed(false);
-    try { await post("/api/v1/holdings", { ticker, name }); setDone(true); }
+    try { await post("/api/v1/simulation/positions", { ticker, name }); setDone(true); }
     catch { setFailed(true); }
     finally { setBusy(false); }
   }
-  return <Button secondary busy={busy} onClick={add} disabled={done}>{done ? "已加入" : failed ? "重试加入" : <><Plus size={14} /> 加入持仓</>}</Button>;
+  return <Button secondary busy={busy} onClick={add} disabled={done}>{done ? "已加入模拟持仓" : failed ? "重试加入" : <><Plus size={14} /> 加入模拟持仓</>}</Button>;
 }
 
 function VibePage() {
@@ -235,7 +251,7 @@ function AgentReportPage({ kind }: { kind: "analyze" | "track" | "screen" | "ask
     catch (e) { setError((e as Error).message); }
     finally { setBusy(false); }
   }
-  return <div className="stack"><Card title="研究任务"><form onSubmit={run} className="form-grid"><Field label={config.label}><input value={value} onChange={(e) => setValue(e.target.value)} placeholder={config.placeholder} /></Field>{kind !== "ask" && <Field label="研究日期"><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>}<Field label="模型"><select value={model} onChange={(e) => setModel(e.target.value)}><option value="openai">OpenAI</option><option value="qwen">Qwen</option></select></Field><Button busy={busy} type="submit"><Search size={15} />{config.button}</Button></form><ErrorBox error={error} /></Card>{kind === "analyze" && result.target && <div className="action-strip"><span>将 {result.target} 加入我的持仓</span><AddHolding ticker={result.target} /></div>}{(result.report || result.error) && <Card><Markdown value={result.report || result.error} /></Card>}</div>;
+  return <div className="stack"><Card title="研究任务"><form onSubmit={run} className="form-grid"><Field label={config.label}><input value={value} onChange={(e) => setValue(e.target.value)} placeholder={config.placeholder} /></Field>{kind !== "ask" && <Field label="研究日期"><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>}<Field label="模型"><select value={model} onChange={(e) => setModel(e.target.value)}><option value="openai">OpenAI</option><option value="qwen">Qwen</option></select></Field><Button busy={busy} type="submit"><Search size={15} />{config.button}</Button></form><ErrorBox error={error} /></Card>{kind === "analyze" && result.target && <div className="action-strip"><span>将 {result.target} 加入模拟持仓</span><AddHolding ticker={result.target} /></div>}{(result.report || result.error) && <Card><Markdown value={result.report || result.error} /></Card>}</div>;
 }
 
 function EvolutionResult({ result }: { result: Json }) {
@@ -259,7 +275,7 @@ function TrackingPage() {
     catch (e) { setError((e as Error).message); }
     finally { setBusy(""); }
   }
-  return <div className="stack"><Card title="全球明星科技大佬 / 基金"><p className="muted">首次 Follow 默认投入 $100,000，并按公开权重同步到“我的持仓”；重复 Follow 不会重复扣减股本。</p><div className="featured-grid">{featured.map((item) => <article className="featured" key={item.id}><span className="rank">#{item.rank}</span><Star size={18} /><h3>{item.name}</h3><p>{item.fund}</p><small>{item.style}</small><Button busy={busy === item.id} onClick={() => follow(item.id)}>一键 Follow</Button></article>)}</div><ErrorBox error={error} /></Card><EvolutionResult result={result} /><AgentReportPage kind="track" /></div>;
+  return <div className="stack"><Card title="全球明星科技大佬 / 基金"><p className="muted">首次 Follow 默认从当前用户的模拟账户投入 $100,000，并按公开权重生成模拟持仓；重复 Follow 不会重复扣减股本。</p><div className="featured-grid">{featured.map((item) => <article className="featured" key={item.id}><span className="rank">#{item.rank}</span><Star size={18} /><h3>{item.name}</h3><p>{item.fund}</p><small>{item.style}</small><Button busy={busy === item.id} onClick={() => follow(item.id)}>一键 Follow 到模拟持仓</Button></article>)}</div><ErrorBox error={error} /></Card><EvolutionResult result={result} /><AgentReportPage kind="track" /></div>;
 }
 
 function EvolvePage() {
@@ -310,28 +326,28 @@ function HoldingsOverview({ rows, onRemove, onInvest }: { rows: Json[]; onRemove
     <div className="pie-panel">
       {pieRows.length ? <><ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={pieRows} dataKey="share_value" nameKey="label" innerRadius="52%" outerRadius="82%" paddingAngle={2}>{pieRows.map((item, index) => <Cell key={item.ticker} fill={pieColors[index % pieColors.length]} />)}</Pie><Tooltip formatter={(value: number, name: string) => [`${fmt(value)} ${usesMarketValue ? currency : "目标权重"} · ${fmt(Number(value) / total * 100)}%`, name]} contentStyle={{ background: "#273548", border: "1px solid #4a5d75", borderRadius: 8, boxShadow: "0 8px 24px #0006" }} /></PieChart></ResponsiveContainer><div className="pie-center"><small>{usesMarketValue ? `${currency} 总市值` : "目标组合"}</small><strong>{usesMarketValue ? fmt(total) : `${fmt(total)}%`}</strong></div></> : <div className="empty">录入持仓数量后显示占比</div>}
     </div>
-    <div className="holding-table"><div className="table-wrap"><table><thead><tr><th>股票</th><th>最新价</th><th>持仓市值</th><th>{usesMarketValue ? "占比" : "目标权重"}</th><th>当日盈亏</th><th>累计盈亏</th><th /></tr></thead><tbody>{selected.map((item) => <tr key={item.ticker}><td><button className="stock-select" onClick={() => onInvest(item.ticker, item.name)} title="点击增加股本"><strong>{item.ticker}</strong><small>{item.name || item.status}</small></button></td><td>{item.last_price ? `${fmt(item.last_price)} ${item.currency}${item.quote_stale ? " · 缓存" : ""}` : "行情不可用"}</td><td>{fmt(item.market_value)} {item.currency}</td><td>{fmt(usesMarketValue ? item.allocation_pct : item.target_weight_pct)}%</td><td className={item.day_gain >= 0 ? "positive" : "negative"}>{fmt(item.day_gain)}</td><td className={item.total_gain >= 0 ? "positive" : "negative"}>{fmt(item.total_gain)}<small>{fmt(item.total_gain_pct)}%</small></td><td><button className="icon-button danger" onClick={() => onRemove(item.ticker)} aria-label={`删除 ${item.ticker}`}><Trash2 size={16} /></button></td></tr>)}</tbody></table></div></div>
+    <div className="holding-table"><div className="table-wrap"><table><thead><tr><th>股票</th><th>最新价</th><th>模拟持仓市值</th><th>{usesMarketValue ? "占比" : "目标权重"}</th><th>当日盈亏</th><th>累计盈亏</th><th /></tr></thead><tbody>{selected.map((item) => <tr key={item.ticker}><td><button className="stock-select" onClick={() => onInvest(item.ticker, item.name)} title="点击增加模拟股本"><strong>{item.ticker}</strong><small>{item.name || item.status}</small></button></td><td>{item.last_price ? `${fmt(item.last_price)} ${item.currency}${item.quote_stale ? " · 缓存" : ""}` : "行情不可用"}</td><td>{fmt(item.market_value)} {item.currency}</td><td>{fmt(usesMarketValue ? item.allocation_pct : item.target_weight_pct)}%</td><td className={item.day_gain >= 0 ? "positive" : "negative"}>{fmt(item.day_gain)}</td><td className={item.total_gain >= 0 ? "positive" : "negative"}>{fmt(item.total_gain)}<small>{fmt(item.total_gain_pct)}%</small></td><td><button className="icon-button danger" onClick={() => onRemove(item.ticker)} aria-label={`删除 ${item.ticker}`}><Trash2 size={16} /></button></td></tr>)}</tbody></table></div></div>
   </div>;
   const actions = <div className="overview-actions"><div className="currency-tabs">{currencies.map((item) => <button className={item === currency ? "active" : ""} key={item} onClick={() => setCurrency(item)}>{item}</button>)}</div><Button secondary onClick={() => setFullscreen(true)}><Maximize2 size={14} />全屏</Button></div>;
 
-  return <><Card title="持仓占比 Overview" action={actions}>{content}</Card>{fullscreen && <div className="fullscreen-backdrop" role="dialog" aria-modal="true" aria-label="持仓占比全屏视图" onClick={() => setFullscreen(false)}><section className="fullscreen-card" onClick={(event) => event.stopPropagation()}><div className="card-head"><h2>持仓占比 Overview · {currency}</h2><button className="icon-button" onClick={() => setFullscreen(false)} aria-label="退出全屏"><X size={18} /></button></div>{content}</section></div>}</>;
+  return <><Card title="模拟持仓占比" action={actions}>{content}</Card>{fullscreen && <div className="fullscreen-backdrop" role="dialog" aria-modal="true" aria-label="模拟持仓占比全屏视图" onClick={() => setFullscreen(false)}><section className="fullscreen-card" onClick={(event) => event.stopPropagation()}><div className="card-head"><h2>模拟持仓占比 · {currency}</h2><button className="icon-button" onClick={() => setFullscreen(false)} aria-label="退出全屏"><X size={18} /></button></div>{content}</section></div>}</>;
 }
 
-function HoldingsPage() {
+function SimulationPage() {
   const [data, setData] = useState<Json>({ holdings: [], totals: {} });
   const [performance, setPerformance] = useState<Json>({ curve: [] });
   const [form, setForm] = useState({ ticker: "", name: "", quantity: 0, avg_cost: 0 });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  async function load() { setBusy(true); setError(""); try { setData(await get<Json>("/api/v1/holdings")); void get<Json>("/api/v1/holdings/performance?days=90").then(setPerformance).catch((e) => setError(e.message)); } catch (e) { setError((e as Error).message); } finally { setBusy(false); } }
+  async function load() { setBusy(true); setError(""); try { setData(await get<Json>("/api/v1/simulation/portfolio")); void get<Json>("/api/v1/simulation/performance?days=90").then(setPerformance).catch((e) => setError(e.message)); } catch (e) { setError((e as Error).message); } finally { setBusy(false); } }
   useEffect(() => { void load(); }, []);
-  async function save(event: FormEvent) { event.preventDefault(); setBusy(true); setError(""); try { await post<Json>("/api/v1/holdings", form); setForm({ ticker: "", name: "", quantity: 0, avg_cost: 0 }); await load(); } catch (e) { setError((e as Error).message); } finally { setBusy(false); } }
-  async function remove(ticker: string) { try { await del(`/api/v1/holdings/${ticker}`); await load(); } catch (e) { setError((e as Error).message); } }
-  async function invest(ticker: string, name: string) { const value = window.prompt(`是否为 ${ticker} 增加股本？请输入投入金额（USD）`, "10000"); if (value === null) return; const capital = Number(value); if (!(capital > 0)) { setError("请输入大于 0 的股本金额"); return; } setBusy(true); setError(""); try { setData(await post<Json>(`/api/v1/holdings/${encodeURIComponent(ticker)}/invest`, { capital_usd: capital, name })); void get<Json>("/api/v1/holdings/performance?days=90").then(setPerformance); } catch (e) { setError((e as Error).message); } finally { setBusy(false); } }
-  async function buyCoins() { if (!window.confirm("支付虚拟 $10，兑换模拟股本 $1,000,000？")) return; setBusy(true); setError(""); try { setData(await post<Json>("/api/v1/account/virtual-capital", { packs: 1 })); } catch (e) { setError((e as Error).message); } finally { setBusy(false); } }
+  async function save(event: FormEvent) { event.preventDefault(); setBusy(true); setError(""); try { await post<Json>("/api/v1/simulation/positions", form); setForm({ ticker: "", name: "", quantity: 0, avg_cost: 0 }); await load(); } catch (e) { setError((e as Error).message); } finally { setBusy(false); } }
+  async function remove(ticker: string) { try { await del(`/api/v1/simulation/positions/${ticker}`); await load(); } catch (e) { setError((e as Error).message); } }
+  async function invest(ticker: string, name: string) { const value = window.prompt(`是否为 ${ticker} 增加模拟股本？请输入投入金额（USD）`, "10000"); if (value === null) return; const capital = Number(value); if (!(capital > 0)) { setError("请输入大于 0 的模拟股本金额"); return; } setBusy(true); setError(""); try { setData(await post<Json>(`/api/v1/simulation/positions/${encodeURIComponent(ticker)}/invest`, { capital_usd: capital, name })); void get<Json>("/api/v1/simulation/performance?days=90").then(setPerformance); } catch (e) { setError((e as Error).message); } finally { setBusy(false); } }
+  async function buyCoins() { if (!window.confirm("支付虚拟 $10，兑换模拟股本 $1,000,000？")) return; setBusy(true); setError(""); try { setData(await post<Json>("/api/v1/simulation/capital", { packs: 1 })); } catch (e) { setError((e as Error).message); } finally { setBusy(false); } }
   const account = data.account || {};
   const totals = [{ label: "模拟账户总权益", value: `$${fmt(account.portfolio_equity_usd)}` }, { label: "可用股本", value: `$${fmt(account.available_capital_usd)}` }, { label: "已投入股本", value: `$${fmt(account.invested_capital_usd)}` }, { label: "累计盈亏", value: `$${fmt(Number(account.realized_pnl_usd || 0) + Number(account.unrealized_pnl_usd || 0))}`, tone: Number(account.realized_pnl_usd || 0) + Number(account.unrealized_pnl_usd || 0) >= 0 ? "positive" : "negative" }];
-  return <div className="stack"><div className="holdings-toolbar"><span className="persisted"><span className="status-dot online" />SQLite 已保存 · 不可变快照</span><div className="overview-actions"><Button secondary busy={busy} onClick={buyCoins}><CircleDollarSign size={14} />虚拟 $10 → 股本 $1M</Button><Button secondary busy={busy} onClick={load}><RefreshCw size={14} />刷新行情</Button></div></div><Metrics items={totals} /><ErrorBox error={error} />{(data.holdings || []).length ? <HoldingsOverview rows={data.holdings} onRemove={remove} onInvest={invest} /> : <Card><div className="empty">还没有持仓，可从热点、分析或 Follow 组合加入。</div></Card>}<Card title="每日收益变化 · 最近 90 个交易日"><p className="muted">点击上方任一股票即可选择投入股本；盈利会增加可用股本，亏损会减少可用股本。</p>{performance.curve?.length ? <Curve rows={performance.curve} /> : <div className="empty">正在计算收益曲线，或暂时没有可用行情</div>}</Card><Card title="手动校准持仓"><form onSubmit={save} className="form-grid"><Field label="股票代码"><input required value={form.ticker} onChange={(e) => setForm({ ...form, ticker: e.target.value.toUpperCase() })} placeholder="NVDA" /></Field><Field label="名称"><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field><Field label="数量"><input type="number" min="0" step="any" value={form.quantity} onChange={(e) => setForm({ ...form, quantity: Number(e.target.value) })} /></Field><Field label="平均成本"><input type="number" min="0" step="any" value={form.avg_cost} onChange={(e) => setForm({ ...form, avg_cost: Number(e.target.value) })} /></Field><Button busy={busy} type="submit"><Plus size={15} />保存</Button></form></Card></div>;
+  return <div className="stack"><div className="holdings-toolbar"><span className="persisted"><span className="status-dot online" />当前用户 · SQLite 隔离快照</span><div className="overview-actions"><Button secondary busy={busy} onClick={buyCoins}><CircleDollarSign size={14} />虚拟 $10 → 模拟股本 $1M</Button><Button secondary busy={busy} onClick={load}><RefreshCw size={14} />刷新行情</Button></div></div><Metrics items={totals} /><ErrorBox error={error} />{(data.holdings || []).length ? <HoldingsOverview rows={data.holdings} onRemove={remove} onInvest={invest} /> : <Card><div className="empty">还没有模拟持仓，可从热点、分析或 Follow 组合加入。</div></Card>}<Card title="模拟收益变化 · 最近 90 个交易日"><p className="muted">点击上方任一股票即可增加模拟股本；盈利会增加可用股本，亏损会减少可用股本。</p>{performance.curve?.length ? <Curve rows={performance.curve} /> : <div className="empty">正在计算模拟收益曲线，或暂时没有可用行情</div>}</Card><Card title="手动校准模拟持仓"><form onSubmit={save} className="form-grid"><Field label="股票代码"><input required value={form.ticker} onChange={(e) => setForm({ ...form, ticker: e.target.value.toUpperCase() })} placeholder="NVDA" /></Field><Field label="名称"><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field><Field label="数量"><input type="number" min="0" step="any" value={form.quantity} onChange={(e) => setForm({ ...form, quantity: Number(e.target.value) })} /></Field><Field label="平均成本"><input type="number" min="0" step="any" value={form.avg_cost} onChange={(e) => setForm({ ...form, avg_cost: Number(e.target.value) })} /></Field><Button busy={busy} type="submit"><Plus size={15} />保存</Button></form></Card></div>;
 }
 
 function BacktestPage() {
@@ -345,11 +361,21 @@ function BacktestPage() {
 }
 
 function App() {
-  const [page, setPage] = useState<Page>("holdings");
+  const [page, setPage] = useState<Page>("simulation");
   const [menu, setMenu] = useState(false);
   const [backend, setBackend] = useState(false);
-  useEffect(() => { get("/health").then(() => setBackend(true)).catch(() => setBackend(false)); }, []);
-  const pages: Record<Page, ReactNode> = { vibe: <VibePage />, hotspots: <HotspotsPage />, dashboard: <DashboardPage />, analyze: <AgentReportPage kind="analyze" />, evolve: <EvolvePage />, holdings: <HoldingsPage />, backtest: <BacktestPage />, track: <TrackingPage />, screen: <AgentReportPage kind="screen" />, ask: <AgentReportPage kind="ask" /> };
+  const [user, setUser] = useState<Json | null | undefined>(undefined);
+  useEffect(() => {
+    get("/health").then(() => setBackend(true)).catch(() => setBackend(false));
+    if (!getAuthToken()) { setUser(null); return; }
+    get<Json>("/api/v1/auth/me").then(setUser).catch(() => { clearAuthToken(); setUser(null); });
+  }, []);
+  async function logout() {
+    try { await post("/api/v1/auth/logout", {}); } finally { clearAuthToken(); setUser(null); }
+  }
+  if (user === undefined) return <main className="auth-shell"><div className="empty">正在验证账户…</div></main>;
+  if (!user) return <AuthPage onAuth={setUser} />;
+  const pages: Record<Page, ReactNode> = { vibe: <VibePage />, hotspots: <HotspotsPage />, dashboard: <DashboardPage />, analyze: <AgentReportPage kind="analyze" />, evolve: <EvolvePage />, simulation: <SimulationPage />, backtest: <BacktestPage />, track: <TrackingPage />, screen: <AgentReportPage kind="screen" />, ask: <AgentReportPage kind="ask" /> };
   let lastGroup = "";
   return <div className="app-shell">
     <aside className={menu ? "sidebar open" : "sidebar"}>
@@ -358,7 +384,7 @@ function App() {
       <div className="sidebar-foot"><span className={`status-dot ${backend ? "online" : ""}`} />Clarity API {backend ? "正常" : "离线"}</div>
     </aside>
     {menu && <button className="scrim" onClick={() => setMenu(false)} aria-label="关闭菜单" />}
-    <main><header><button className="menu-button" onClick={() => setMenu(true)} aria-label="打开菜单"><Menu /></button><div><h1>{pageMeta[page][0]}</h1><p>{pageMeta[page][1]}</p></div><div className="live-pill"><Activity size={14} /> LIVE</div></header><div className="page">{pages[page]}</div></main>
+    <main><header><button className="menu-button" onClick={() => setMenu(true)} aria-label="打开菜单"><Menu /></button><div><h1>{pageMeta[page][0]}</h1><p>{pageMeta[page][1]}</p></div><div className="account-menu"><UserRound size={14} /><span>{user.display_name}</span><button className="icon-button" onClick={logout} aria-label="退出登录" title="退出登录"><LogOut size={14} /></button></div><div className="live-pill"><Activity size={14} /> LIVE</div></header><div className="page">{pages[page]}</div></main>
   </div>;
 }
 

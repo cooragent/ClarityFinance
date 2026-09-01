@@ -1,4 +1,4 @@
-"""SQLite-backed simulated holdings for the local Clarity app."""
+"""User-isolated simulated stock trading and portfolio valuation."""
 
 from __future__ import annotations
 
@@ -17,8 +17,7 @@ from .data_provider import MarketType, YfinanceFetcher, detect_market_type
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-HOLDINGS_FILE = PROJECT_ROOT / "runtime/my_holdings.json"  # Legacy import key; data now lives in SQLite.
-# ponytail: the app has no authentication yet; key this state by user_id when accounts are introduced.
+HOLDINGS_FILE = PROJECT_ROOT / "runtime/my_holdings.json"  # Legacy state is claimed by the first authenticated user.
 DEFAULT_CAPITAL_USD = 1_000_000.0
 VIRTUAL_CAPITAL_USD = 1_000_000.0
 VIRTUAL_COIN_PRICE_USD = 10.0
@@ -46,32 +45,47 @@ def _new_state() -> dict[str, Any]:
     }
 
 
-def _load_state() -> dict[str, Any]:
-    exists = state_exists(HOLDINGS_FILE)
-    raw = read_state(HOLDINGS_FILE, _new_state())
+def _state_file(user_id: str | None) -> Path:
+    return HOLDINGS_FILE if user_id is None else HOLDINGS_FILE.parent / "users" / user_id / "simulated_trading.json"
+
+
+def _load_state(user_id: str | None = None) -> dict[str, Any]:
+    path = _state_file(user_id)
+    exists = state_exists(path)
+    if user_id and not exists and state_exists(HOLDINGS_FILE):
+        claim = HOLDINGS_FILE.parent / "legacy_simulation_claim.json"
+        if not state_exists(claim):
+            raw = read_state(HOLDINGS_FILE, _new_state())
+            write_state(claim, {"user_id": user_id})
+        else:
+            raw = _new_state()
+    else:
+        raw = read_state(path, _new_state())
     state = {"account": _new_state()["account"], "holdings": raw} if isinstance(raw, list) else raw
     account = {**_new_state()["account"], **state.get("account", {})}
     normalized = {"account": account, "holdings": state.get("holdings", [])}
     if not exists or normalized != raw:
-        write_state(HOLDINGS_FILE, normalized)
+        write_state(path, normalized)
     return normalized
 
 
-def _save_state(state: dict[str, Any]) -> None:
-    write_state(HOLDINGS_FILE, state)
+def _save_state(state: dict[str, Any], user_id: str | None = None) -> None:
+    write_state(_state_file(user_id), state)
     holdings_performance.cache_clear()
 
 
-def list_holdings() -> list[dict[str, Any]]:
+def list_holdings(user_id: str | None = None) -> list[dict[str, Any]]:
     with _LOCK:
-        return _load_state()["holdings"]
+        return _load_state(user_id)["holdings"]
 
 
-def add_holdings(items: list[dict[str, Any]], source: str, source_detail: str = "") -> list[dict[str, Any]]:
+def add_holdings(
+    items: list[dict[str, Any]], source: str, source_detail: str = "", user_id: str | None = None,
+) -> list[dict[str, Any]]:
     """Add watchlist entries without zeroing an existing position."""
     now = datetime.now().isoformat(timespec="seconds")
     with _LOCK:
-        state = _load_state()
+        state = _load_state(user_id)
         holdings = state["holdings"]
         indexed = {item["ticker"]: item for item in holdings}
         for incoming in items:
@@ -103,15 +117,17 @@ def add_holdings(items: list[dict[str, Any]], source: str, source_detail: str = 
             if provenance and provenance not in holding["sources"]:
                 holding["sources"].append(provenance)
             holding["updated_at"] = now
-        _save_state(state)
+        _save_state(state, user_id)
         return holdings
 
 
-def add_watchlist(ticker: str, name: str = "") -> list[dict[str, Any]]:
-    return add_holdings([{"ticker": ticker, "name": name}], "手动加入")
+def add_watchlist(ticker: str, name: str = "", user_id: str | None = None) -> list[dict[str, Any]]:
+    return add_holdings([{"ticker": ticker, "name": name}], "手动加入", user_id=user_id)
 
 
-def set_position(ticker: str, quantity: float, avg_cost: float, name: str = "") -> list[dict[str, Any]]:
+def set_position(
+    ticker: str, quantity: float, avg_cost: float, name: str = "", user_id: str | None = None,
+) -> list[dict[str, Any]]:
     if not isfinite(quantity) or not isfinite(avg_cost):
         raise ValueError("持仓数量和平均成本必须是有限数字")
     if quantity > 0 and avg_cost <= 0:
@@ -119,6 +135,7 @@ def set_position(ticker: str, quantity: float, avg_cost: float, name: str = "") 
     return add_holdings(
         [{"ticker": ticker, "name": name, "quantity": quantity, "avg_cost": avg_cost}],
         "手动录入",
+        user_id=user_id,
     )
 
 
@@ -290,9 +307,9 @@ def _snapshot(state: dict[str, Any], quotes: dict[str, tuple[float, float]] | No
     }
 
 
-def holdings_snapshot() -> dict[str, Any]:
+def holdings_snapshot(user_id: str | None = None) -> dict[str, Any]:
     with _LOCK:
-        state = _load_state()
+        state = _load_state(user_id)
     return _snapshot(state)
 
 
@@ -330,13 +347,15 @@ def _apply_investment(
         holding["sources"].append(provenance)
 
 
-def invest_capital(ticker: str, capital_usd: float, name: str = "") -> dict[str, Any]:
+def invest_capital(
+    ticker: str, capital_usd: float, name: str = "", user_id: str | None = None,
+) -> dict[str, Any]:
     ticker = _ticker(ticker)
     capital_usd = float(capital_usd)
     if not isfinite(capital_usd) or capital_usd <= 0:
         raise ValueError("投入股本必须大于 0")
     with _LOCK:
-        state = _load_state()
+        state = _load_state(user_id)
         quotes: dict[str, tuple[float, float]] = {}
         before = _snapshot(state, quotes)
         if before["valuation_errors"] or before["stale_quotes"]:
@@ -346,19 +365,19 @@ def invest_capital(ticker: str, capital_usd: float, name: str = "") -> dict[str,
         price = _cached_quote(ticker, quotes)[0]
         currency = _currency(ticker)
         _apply_investment(state, {"ticker": ticker, "name": name}, capital_usd, price, _fx_per_usd(currency, quotes), "增加股本", "")
-        _save_state(state)
+        _save_state(state, user_id)
         return _snapshot(state, quotes)
 
 
 def invest_weighted_holdings(
     items: list[dict[str, Any]], capital_usd: float, source: str, source_detail: str,
-    allocation_id: str,
+    allocation_id: str, user_id: str | None = None,
 ) -> dict[str, Any]:
     capital_usd = float(capital_usd)
     if not isfinite(capital_usd) or capital_usd <= 0:
         raise ValueError("投入股本必须大于 0")
     with _LOCK:
-        state = _load_state()
+        state = _load_state(user_id)
         if allocation_id in state["account"]["followed_allocations"]:
             return {**_snapshot(state), "investment": {"capital_usd": 0, "already_followed": True}}
         quotes: dict[str, tuple[float, float]] = {}
@@ -399,17 +418,17 @@ def invest_weighted_holdings(
             allocation = capital_usd * weight / weight_total
             _apply_investment(state, item, allocation, price, fx_per_usd, source, source_detail)
         state["account"]["followed_allocations"][allocation_id] = capital_usd
-        _save_state(state)
+        _save_state(state, user_id)
         return {
             **_snapshot(state, quotes),
             "investment": {"capital_usd": capital_usd, "positions": len(priced), "already_followed": False},
         }
 
 
-def remove_holding(ticker: str) -> list[dict[str, Any]]:
+def remove_holding(ticker: str, user_id: str | None = None) -> list[dict[str, Any]]:
     ticker = _ticker(ticker)
     with _LOCK:
-        state = _load_state()
+        state = _load_state(user_id)
         holding = next((item for item in state["holdings"] if item["ticker"] == ticker), None)
         if not holding:
             return state["holdings"]
@@ -421,19 +440,19 @@ def remove_holding(ticker: str) -> list[dict[str, Any]]:
             proceeds = quantity * quotes[ticker][0] / fx_per_usd
             state["account"]["realized_pnl_usd"] += proceeds - invested
         state["holdings"] = [item for item in state["holdings"] if item["ticker"] != ticker]
-        _save_state(state)
+        _save_state(state, user_id)
         return state["holdings"]
 
 
-def buy_virtual_capital(packs: int = 1) -> dict[str, Any]:
+def buy_virtual_capital(packs: int = 1, user_id: str | None = None) -> dict[str, Any]:
     if not 1 <= int(packs) <= 100:
         raise ValueError("每次购买数量必须在 1 到 100 之间")
     with _LOCK:
-        state = _load_state()
+        state = _load_state(user_id)
         state["account"]["virtual_capital_usd"] += int(packs) * VIRTUAL_CAPITAL_USD
         state["account"]["virtual_coin_spend_usd"] += int(packs) * VIRTUAL_COIN_PRICE_USD
-        _save_state(state)
-    return holdings_snapshot()
+        _save_state(state, user_id)
+    return holdings_snapshot(user_id)
 
 
 def _price_history(ticker: str, start: str, end: str) -> pd.Series:
@@ -443,10 +462,10 @@ def _price_history(ticker: str, start: str, end: str) -> pd.Series:
     return data.set_index("date")["close"].dropna().astype(float)
 
 
-@lru_cache(maxsize=8)
-def holdings_performance(days: int = 90) -> dict[str, Any]:
+@lru_cache(maxsize=64)
+def holdings_performance(days: int = 90, user_id: str | None = None) -> dict[str, Any]:
     """Reconstruct daily returns for current positions, separated by currency."""
-    holdings = list_holdings()
+    holdings = list_holdings(user_id)
     positions = [item for item in holdings if float(item.get("quantity") or 0) > 0]
     mode = "actual"
     if not positions:

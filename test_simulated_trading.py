@@ -2,7 +2,9 @@ import pandas as pd
 import pytest
 
 from clarity.core.state_store import state_history
-from clarity.core.tools import my_holdings
+from clarity.core.tools import simulated_trading
+
+my_holdings = simulated_trading
 
 
 def test_my_holdings_follow_update_and_snapshot(tmp_path, monkeypatch):
@@ -102,3 +104,16 @@ def test_snapshot_keeps_market_value_when_quotes_are_temporarily_unavailable(tmp
     assert snapshot["holdings"][0]["market_value"] == 160
     assert snapshot["holdings"][0]["quote_stale"] is True
     assert snapshot["stale_quotes"] == ["NVDA"]
+
+
+def test_simulated_positions_are_isolated_by_user(tmp_path, monkeypatch):
+    monkeypatch.setattr(my_holdings, "HOLDINGS_FILE", tmp_path / "holdings.json")
+    monkeypatch.setattr(my_holdings, "_quote", lambda ticker: (100.0, 100.0))
+    alice = "a" * 32
+    bob = "b" * 32
+
+    my_holdings.set_position("NVDA", 2, 80, user_id=alice)
+
+    assert my_holdings.holdings_snapshot(alice)["holdings"][0]["ticker"] == "NVDA"
+    assert my_holdings.holdings_snapshot(bob)["holdings"] == []
+    assert my_holdings.holdings_snapshot(bob)["account"]["available_capital_usd"] == 1_000_000

@@ -47,7 +47,7 @@ from clarity.core.tools.featured_portfolios import (
     get_featured_portfolios,
 )
 from clarity.core.tools.hotspot_tools import find_related_stocks, get_today_hotspots
-from clarity.core.tools.my_holdings import add_holdings, holdings_snapshot, remove_holding, set_position
+from clarity.core.tools.simulated_trading import add_holdings, holdings_snapshot, remove_holding, set_position
 from clarity.core.tools.portfolio_evolution import create_portfolio, continue_portfolio
 
 # Configure logging
@@ -130,7 +130,7 @@ def search_hotspot_stocks(hotspots: list, index: int):
                 lines.append(f"- [{item['title']}]({item['link']}) — {item['publisher']}")
         lines += ["", "*搜索相关性不代表投资建议，请核实事件与公司的实际业务关联。*"]
         updates = [
-            gr.update(value=f"＋ 加入持仓 {stock['symbol']}", visible=True)
+            gr.update(value=f"＋ 加入模拟持仓 {stock['symbol']}", visible=True)
             if i < len(result["stocks"]) else gr.update(visible=False)
             for i, stock in enumerate((result["stocks"] + [{}] * 8)[:8])
         ]
@@ -146,13 +146,13 @@ def add_hotspot_stock(result: dict, index: int):
         return "请先搜索相关股票。"
     stock = stocks[index]
     add_holdings([stock], "今日热点", str(result.get("event", "")))
-    return f"✅ `{stock['symbol']}` 已加入“我的持仓”（数量未知，标记为待建仓）。"
+    return f"✅ `{stock['symbol']}` 已加入“模拟持仓”（数量未知，标记为待建仓）。"
 
 
 def quick_add_holding(ticker: str, source: str = "股票分析"):
     try:
         add_holdings([{"ticker": ticker}], source)
-        return f"✅ `{ticker.strip().upper()}` 已加入“我的持仓”（数量未知，标记为待建仓）。"
+        return f"✅ `{ticker.strip().upper()}` 已加入“模拟持仓”（数量未知，标记为待建仓）。"
     except Exception as exc:
         return f"❌ 加入失败：{exc}"
 
@@ -257,7 +257,7 @@ def follow_featured(featured_id, profile, risk, size, target, drawdown, cost, ye
         )
         summary, portfolio, curve, history = _format_portfolio_evolution(result)
         summary = (
-            f"> 已 Follow **{source['manager']}** · {source['period']} · 持仓日期 {source['portfolio_date']} · [公开来源]({source['source_url']}) · 已自动同步“我的持仓”\n\n"
+            f"> 已 Follow **{source['manager']}** · {source['period']} · 持仓日期 {source['portfolio_date']} · [公开来源]({source['source_url']}) · 已自动同步“模拟持仓”\n\n"
             + summary
         )
         return holdings, summary, portfolio, curve, history
@@ -266,7 +266,7 @@ def follow_featured(featured_id, profile, risk, size, target, drawdown, cost, ye
         return None, f"❌ Follow 失败：{exc}", None, None, None
 
 
-# ========== 我的持仓 ==========
+# ========== 模拟持仓 ==========
 
 def _holding_outputs():
     snapshot = holdings_snapshot()
@@ -327,7 +327,7 @@ def save_my_position(ticker, name, quantity, avg_cost):
 def delete_my_position(ticker):
     try:
         remove_holding(ticker)
-        return "✅ 已从我的持仓移除。", *_holding_outputs()
+        return "✅ 已从模拟持仓移除。", *_holding_outputs()
     except Exception as exc:
         return f"❌ 移除失败：{exc}", *refresh_my_holdings()
 
@@ -1166,7 +1166,7 @@ def create_ui():
                         for offset in (0, 4):
                             with gr.Row():
                                 hotspot_add_buttons.extend(
-                                    gr.Button(f"加入持仓 {i + 1}", visible=False)
+                                    gr.Button(f"加入模拟持仓 {i + 1}", visible=False)
                                     for i in range(offset, offset + 4)
                                 )
                         hotspot_add_status = gr.Markdown()
@@ -1246,7 +1246,7 @@ def create_ui():
                             variant="primary",
                             size="lg",
                         )
-                        analyze_add = gr.Button("＋ 加入我的持仓")
+                        analyze_add = gr.Button("＋ 加入模拟持仓")
                         analyze_add_status = gr.Markdown()
                         
                         gr.Markdown(
@@ -1343,9 +1343,9 @@ def create_ui():
                         outputs=[featured_holdings, *evolution_outputs],
                     )
 
-            # ===== 我的持仓 Tab =====
-            with gr.TabItem("💼 我的持仓", id="my-holdings") as my_holdings_tab:
-                gr.Markdown("### 我的持仓\n集中查看手动添加、热点发现和明星组合 Follow 的股票。")
+            # ===== 模拟持仓 Tab =====
+            with gr.TabItem("💼 模拟持仓", id="my-holdings") as my_holdings_tab:
+                gr.Markdown("### 模拟持仓\n集中查看手动添加、热点发现和明星组合 Follow 的模拟股票。")
                 my_holdings_summary = gr.Markdown(
                     '<div class="holding-cards"><div class="holding-card"><span>持仓资产</span><strong>—</strong></div><div class="holding-card"><span>当前市值</span><strong>—</strong></div><div class="holding-card"><span>今日盈亏</span><strong>—</strong></div><div class="holding-card"><span>累计盈亏</span><strong>—</strong></div></div>'
                 )

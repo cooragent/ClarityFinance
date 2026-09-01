@@ -1,3 +1,4 @@
+from clarity.core.tools import featured_portfolios
 from clarity.core.tools.featured_portfolios import _parse_holdings, get_featured_portfolios
 
 
@@ -17,3 +18,28 @@ def test_featured_holdings_parser():
     assert result["holdings"][0] == {
         "ticker": "BRK-B", "name": "Berkshire Hathaway", "weight_pct": 55.5, "activity": "Add 2%"
     }
+
+
+def test_follow_allocates_only_to_the_authenticated_users_simulation(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        featured_portfolios,
+        "fetch_featured_holdings",
+        lambda featured_id: {
+            "manager": "Example Fund", "period": "Q2 2026", "portfolio_date": "2026-06-30",
+            "holdings": [{"ticker": "AAPL", "name": "Apple", "weight_pct": 100}],
+        },
+    )
+    monkeypatch.setattr(featured_portfolios, "_state_exists", lambda path: False)
+    monkeypatch.setattr(featured_portfolios, "create_portfolio", lambda *args: {"profile": args[0]})
+
+    def invest(*args):
+        captured["user_id"] = args[-1]
+        return {"investment": {"already_followed": False}, "account": {}}
+
+    monkeypatch.setattr(featured_portfolios, "invest_weighted_holdings", invest)
+    featured_portfolios.follow_featured_portfolio(
+        "BRK", "Follow", "均衡", 5, 12, 20, 0.15, end="2026-08-31", user_id="alice"
+    )
+
+    assert captured["user_id"] == "alice"

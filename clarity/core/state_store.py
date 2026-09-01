@@ -24,7 +24,7 @@ def _location(legacy_path: Path) -> tuple[Path, str]:
         return path.parent / "clarity.sqlite3", path.as_posix()
 
 
-def _connect(database: Path) -> sqlite3.Connection:
+def connect(database: Path = DATABASE_FILE) -> sqlite3.Connection:
     database.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(database, timeout=30)
     connection.execute("PRAGMA journal_mode = WAL")
@@ -63,7 +63,7 @@ def write_state(legacy_path: Path, value: Any) -> int:
     database, key = _location(legacy_path)
     payload = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    with _connect(database) as connection:
+    with connect(database) as connection:
         connection.execute("BEGIN IMMEDIATE")
         row = connection.execute("SELECT version FROM state WHERE key = ?", (key,)).fetchone()
         version = (row[0] if row else 0) + 1
@@ -82,7 +82,7 @@ def write_state(legacy_path: Path, value: Any) -> int:
 
 def read_state(legacy_path: Path, default: Any) -> Any:
     database, key = _location(legacy_path)
-    with _connect(database) as connection:
+    with connect(database) as connection:
         row = connection.execute("SELECT value FROM state WHERE key = ?", (key,)).fetchone()
     if row:
         return json.loads(row[0])
@@ -96,7 +96,7 @@ def read_state(legacy_path: Path, default: Any) -> Any:
 
 def state_exists(legacy_path: Path) -> bool:
     database, key = _location(legacy_path)
-    with _connect(database) as connection:
+    with connect(database) as connection:
         exists = connection.execute("SELECT 1 FROM state WHERE key = ?", (key,)).fetchone()
     if exists:
         return True
@@ -109,7 +109,7 @@ def state_exists(legacy_path: Path) -> bool:
 
 def state_history(legacy_path: Path) -> list[dict[str, Any]]:
     database, key = _location(legacy_path)
-    with _connect(database) as connection:
+    with connect(database) as connection:
         rows = connection.execute(
             "SELECT version, value, created_at FROM state_snapshots WHERE key = ? ORDER BY version",
             (key,),

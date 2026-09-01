@@ -65,11 +65,11 @@ def _append(path: Path, entry: dict[str, Any]) -> None:
     _atomic_json(path, entries)
 
 
-def _profile_dir(profile: str) -> Path:
+def _profile_dir(profile: str, user_id: str | None = None) -> Path:
     profile = re.sub(r"[^\w\-\u4e00-\u9fff]", "_", profile.strip())[:40]
     if not profile:
         raise ValueError("组合名称不能为空")
-    return RUNTIME_DIR / profile
+    return RUNTIME_DIR / "users" / user_id / profile if user_id else RUNTIME_DIR / profile
 
 
 def build_universe(markets: list[str], sectors: list[str], custom_tickers: str = "") -> list[str]:
@@ -264,8 +264,9 @@ def create_portfolio(
     end: str,
     rounds: int = 3,
     custom_tickers: str = "",
+    user_id: str | None = None,
 ) -> dict[str, Any]:
-    profile_dir = _profile_dir(profile)
+    profile_dir = _profile_dir(profile, user_id)
     if _state_exists(profile_dir / "state.json"):
         raise ValueError("该组合名称已存在，请使用“继续演进”或换一个名称")
     if risk not in BASE_PARAMS or not 2 <= portfolio_size <= 20 or rounds < 0 or rounds > 20:
@@ -311,11 +312,13 @@ def create_portfolio(
         profile_dir / "scoreboard.json",
         {"time": now, "version": 1, "score": evaluation["score"], "annual_return_pct": round(evaluation["metrics"]["annual_return"] * 100, 2), "max_drawdown_pct": round(evaluation["metrics"]["max_drawdown"] * 100, 2), "benchmark_id": benchmark_id, "decision": "baseline"},
     )
-    return continue_portfolio(profile, rounds, end) if rounds else _public_result(state, evaluation, profile_dir, errors)
+    return continue_portfolio(profile, rounds, end, user_id) if rounds else _public_result(state, evaluation, profile_dir, errors)
 
 
-def continue_portfolio(profile: str, rounds: int = 3, end: str | None = None) -> dict[str, Any]:
-    profile_dir = _profile_dir(profile)
+def continue_portfolio(
+    profile: str, rounds: int = 3, end: str | None = None, user_id: str | None = None,
+) -> dict[str, Any]:
+    profile_dir = _profile_dir(profile, user_id)
     state = _read_json(profile_dir / "state.json", None)
     if not state:
         raise ValueError("组合不存在，请先创建组合")

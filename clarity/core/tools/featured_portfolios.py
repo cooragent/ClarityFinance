@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 import httpx
 from parsel import Selector
 
-from .my_holdings import invest_weighted_holdings
+from .simulated_trading import invest_weighted_holdings
 from .portfolio_evolution import _profile_dir, _state_exists, continue_portfolio, create_portfolio
 
 
@@ -93,6 +93,7 @@ def follow_featured_portfolio(
     rounds: int = 3,
     end: str | None = None,
     capital_usd: float = 100_000,
+    user_id: str | None = None,
 ) -> dict:
     featured = next((item for item in FEATURED_PORTFOLIOS if item["id"] == featured_id), None)
     if not featured:
@@ -102,15 +103,15 @@ def follow_featured_portfolio(
     start = (datetime.fromisoformat(end) - timedelta(days=int(years) * 365)).strftime("%Y-%m-%d")
     period = re.sub(r"[^A-Za-z0-9]+", "-", disclosure["period"]).strip("-")
     profile = f"{profile_prefix.strip() or 'Follow'}-{featured['name']}-{period}"
-    if _state_exists(_profile_dir(profile) / "state.json"):
-        result = continue_portfolio(profile, rounds, end)
+    if _state_exists(_profile_dir(profile, user_id) / "state.json"):
+        result = continue_portfolio(profile, rounds, end, user_id)
     else:
         tickers = ",".join(item["ticker"] for item in disclosure["holdings"])
         result = create_portfolio(
             profile, ["美股"], ["科技"], risk,
             min(int(portfolio_size), len(disclosure["holdings"])),
             target_return_pct, max_drawdown_pct, trading_cost_pct,
-            start, end, rounds, tickers,
+            start, end, rounds, tickers, user_id,
         )
     result["featured"] = featured
     result["source_holdings"] = disclosure
@@ -120,6 +121,7 @@ def follow_featured_portfolio(
         "Follow 明星组合",
         f"{disclosure['manager']} · {disclosure['period']}",
         f"featured:{featured_id}:{disclosure['period']}",
+        user_id,
     )
     result["investment"] = investment["investment"]
     result["account"] = investment["account"]

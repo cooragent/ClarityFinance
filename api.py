@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Query
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -47,7 +47,7 @@ from clarity.core.tools.dashboard_scanner import DashboardScanner
 from clarity.core.tools.backtest_tools import run_backtest
 from clarity.core.tools.featured_portfolios import follow_featured_portfolio, get_featured_portfolios
 from clarity.core.tools.hotspot_tools import find_related_stocks, get_today_hotspots
-from clarity.core.tools.my_holdings import (
+from clarity.core.tools.simulated_trading import (
     add_watchlist,
     buy_virtual_capital,
     holdings_performance,
@@ -56,6 +56,7 @@ from clarity.core.tools.my_holdings import (
     remove_holding,
     set_position,
 )
+from clarity.core.users import login_user, logout_user, register_user, user_for_token
 from clarity.core.tools.portfolio_evolution import _atomic_json, _read_json, _state_exists, create_portfolio, continue_portfolio
 from clarity.core.vibe_client import VibeTradingClient
 from clarity.core.notification import NotificationService
@@ -94,6 +95,17 @@ app.add_middleware(
 class ModelSelection(BaseModel):
     """Model selection configuration"""
     provider: str = Field(default="openai", description="LLM provider (openai or qwen)")
+
+
+class RegisterRequest(BaseModel):
+    email: str = Field(..., min_length=3, max_length=254)
+    password: str = Field(..., min_length=8, max_length=128)
+    display_name: str = Field(default="", max_length=50)
+
+
+class LoginRequest(BaseModel):
+    email: str = Field(..., min_length=3, max_length=254)
+    password: str = Field(..., min_length=8, max_length=128)
 
 
 class AnalyzeRequest(BaseModel):
@@ -245,6 +257,18 @@ class HealthResponse(BaseModel):
 
 # ==================== Helper Functions ====================
 
+def _bearer_token(authorization: str | None = Header(default=None)) -> str:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="请先登录")
+    return authorization.removeprefix("Bearer ").strip()
+
+
+def _current_user(token: str = Depends(_bearer_token)) -> dict[str, str]:
+    user = user_for_token(token)
+    if not user:
+        raise HTTPException(status_code=401, detail="登录已过期，请重新登录")
+    return user
+
 def _apply_model_selection(model: str) -> None:
     """Apply LLM model selection"""
     selected = (model or "openai").lower()
@@ -395,6 +419,32 @@ def _dashboard_rows(values: list[Any]) -> list[dict[str, Any]]:
 
 # ==================== API Endpoints ====================
 
+@app.post("/api/v1/auth/register")
+async def register(request: RegisterRequest):
+    try:
+        return register_user(request.email, request.password, request.display_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/v1/auth/login")
+async def login(request: LoginRequest):
+    try:
+        return login_user(request.email, request.password)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
+
+
+@app.get("/api/v1/auth/me")
+async def auth_me(user: dict[str, str] = Depends(_current_user)):
+    return user
+
+
+@app.post("/api/v1/auth/logout")
+async def logout(token: str = Depends(_bearer_token)):
+    logout_user(token)
+    return {"ok": True}
+
 @app.get("/", response_model=HealthResponse)
 async def root():
     """Root endpoint - Health check"""
@@ -450,20 +500,24 @@ def _json_portfolio(result: dict[str, Any]) -> dict[str, Any]:
 
 
 @app.post("/api/v1/portfolio/evolve")
-async def create_evolving_portfolio(request: PortfolioCreateRequest):
+async def create_evolving_portfolio(
+    request: PortfolioCreateRequest, user: dict[str, str] = Depends(_current_user),
+):
     """Create a preference profile, baseline it, then test bounded Candidates."""
     try:
-        return _json_portfolio(create_portfolio(**request.model_dump()))
+        return _json_portfolio(create_portfolio(**request.model_dump(), user_id=user["id"]))
     except Exception as e:
         logger.error("Error creating evolving portfolio: %s", e, exc_info=True)
         raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.post("/api/v1/portfolio/evolve/{profile}")
-async def continue_evolving_portfolio(profile: str, request: PortfolioContinueRequest):
+async def continue_evolving_portfolio(
+    profile: str, request: PortfolioContinueRequest, user: dict[str, str] = Depends(_current_user),
+):
     """Refresh market data and continue the saved portfolio evolution loop."""
     try:
-        return _json_portfolio(continue_portfolio(profile, request.rounds, request.end))
+        return _json_portfolio(continue_portfolio(profile, request.rounds, request.end, user["id"]))
     except Exception as e:
         logger.error("Error continuing portfolio evolution: %s", e, exc_info=True)
         raise HTTPException(status_code=400, detail=str(e))
@@ -476,65 +530,75 @@ async def featured_portfolios():
 
 
 @app.post("/api/v1/portfolio/featured/{featured_id}/follow")
-async def follow_public_portfolio(featured_id: str, request: FeaturedFollowRequest):
+async def follow_public_portfolio(
+    featured_id: str, request: FeaturedFollowRequest, user: dict[str, str] = Depends(_current_user),
+):
     """Seed or continue a self-evolving portfolio from public holdings."""
     try:
-        return _json_portfolio(follow_featured_portfolio(featured_id, **request.model_dump()))
+        return _json_portfolio(follow_featured_portfolio(featured_id, **request.model_dump(), user_id=user["id"]))
     except Exception as e:
         logger.error("Error following featured portfolio: %s", e, exc_info=True)
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.get("/api/v1/holdings")
-async def my_holdings():
-    """Return saved positions with current quotes and P&L."""
-    return holdings_snapshot()
+@app.get("/api/v1/simulation/portfolio")
+async def simulated_portfolio(user: dict[str, str] = Depends(_current_user)):
+    """Return this user's simulated positions with current quotes and P&L."""
+    return holdings_snapshot(user["id"])
 
 
-@app.get("/api/v1/holdings/performance")
-async def my_holdings_performance(days: int = Query(90, ge=7, le=365)):
+@app.get("/api/v1/simulation/performance")
+async def simulated_performance(
+    days: int = Query(90, ge=7, le=365), user: dict[str, str] = Depends(_current_user),
+):
     """Return daily portfolio return series for the current positions."""
-    return holdings_performance(days)
+    return holdings_performance(days, user["id"])
 
 
-@app.post("/api/v1/holdings")
-async def save_holding(request: HoldingRequest):
-    """Add a symbol to the watchlist or update a manually entered position."""
+@app.post("/api/v1/simulation/positions")
+async def save_simulated_position(
+    request: HoldingRequest, user: dict[str, str] = Depends(_current_user),
+):
+    """Add a symbol or update a manually entered simulated position."""
     try:
         if request.quantity is None and request.avg_cost is None:
-            add_watchlist(request.ticker, request.name)
+            add_watchlist(request.ticker, request.name, user["id"])
         elif request.quantity is None or request.avg_cost is None:
             raise ValueError("数量和平均成本必须同时填写")
         else:
-            set_position(request.ticker, request.quantity, request.avg_cost, request.name)
-        return holdings_snapshot()
+            set_position(request.ticker, request.quantity, request.avg_cost, request.name, user["id"])
+        return holdings_snapshot(user["id"])
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.post("/api/v1/holdings/{ticker}/invest")
-async def invest_in_holding(ticker: str, request: CapitalInvestmentRequest):
+@app.post("/api/v1/simulation/positions/{ticker}/invest")
+async def invest_in_simulated_position(
+    ticker: str, request: CapitalInvestmentRequest, user: dict[str, str] = Depends(_current_user),
+):
     """Increase one simulated position using available USD capital."""
     try:
-        return invest_capital(ticker, request.capital_usd, request.name)
+        return invest_capital(ticker, request.capital_usd, request.name, user["id"])
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.post("/api/v1/account/virtual-capital")
-async def purchase_virtual_capital(request: VirtualCapitalRequest):
+@app.post("/api/v1/simulation/capital")
+async def purchase_virtual_capital(
+    request: VirtualCapitalRequest, user: dict[str, str] = Depends(_current_user),
+):
     """Buy $1m of simulated capital for each virtual $10 pack."""
     try:
-        return buy_virtual_capital(request.packs)
+        return buy_virtual_capital(request.packs, user["id"])
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.delete("/api/v1/holdings/{ticker}")
-async def delete_holding(ticker: str):
-    """Remove a symbol from My Holdings."""
+@app.delete("/api/v1/simulation/positions/{ticker}")
+async def delete_simulated_position(ticker: str, user: dict[str, str] = Depends(_current_user)):
+    """Sell and remove one simulated position."""
     try:
-        return {"holdings": remove_holding(ticker)}
+        return {"holdings": remove_holding(ticker, user["id"])}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 

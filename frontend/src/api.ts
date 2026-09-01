@@ -1,10 +1,19 @@
 const API_BASE = import.meta.env.VITE_API_BASE?.replace(/\/$/, "") ||
   (window.location.protocol === "chrome-extension:" ? "http://127.0.0.1:8000" : "");
+const AUTH_KEY = "clarity-auth-token";
+
+export const getAuthToken = () => localStorage.getItem(AUTH_KEY);
+export const setAuthToken = (token: string) => localStorage.setItem(AUTH_KEY, token);
+export const clearAuthToken = () => localStorage.removeItem(AUTH_KEY);
 
 export async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...options,
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+    headers: {
+      "Content-Type": "application/json",
+      ...(getAuthToken() ? { Authorization: `Bearer ${getAuthToken()}` } : {}),
+      ...(options.headers || {}),
+    },
   });
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
